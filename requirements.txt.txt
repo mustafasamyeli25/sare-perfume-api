@@ -1,0 +1,7 @@
+flask
+flask-cors
+pandas
+openai
+gunicorn
+numpy
+python-dotenv
