@@ -1,0 +1,236 @@
+<!--
+=================================================================
+SARE PERFUME - AKILLı KOKU DANIŞMANI
+Shopify "Custom Liquid" Bölümü İçin Tam Kod
+=================================================================
+
+NASIL KULLANILIR:
+1. Shopify Admin > Online Store > Themes > Customize
+2. Koku danışmanını eklemek istediğiniz sayfaya gidin (Anasayfa önerilir)
+3. Sol menüden "Add section" > "Custom Liquid" seçin
+4. Aşağıdaki tüm kodu yapıştırın
+5. "const API_URL" satırındaki adresi kendi Render.com API adresinizle değiştirin
+6. "Save" butonuna tıklayın
+
+=================================================================
+-->
+
+<style>
+  #advisor-container {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    max-width: 700px;
+    margin: 40px auto;
+    padding: 30px;
+    border: 1px solid #e0e0e0;
+    border-radius: 12px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.07);
+    background-color: #ffffff;
+  }
+  #advisor-title {
+    font-size: 26px;
+    font-weight: 600;
+    color: #1a1a1a;
+    text-align: center;
+    margin-bottom: 10px;
+  }
+  #advisor-subtitle {
+    font-size: 16px;
+    color: #666;
+    text-align: center;
+    margin-bottom: 30px;
+  }
+  #advisor-textarea {
+    width: 100%;
+    padding: 15px;
+    font-size: 16px;
+    border-radius: 8px;
+    border: 1px solid #ccc;
+    resize: vertical;
+    min-height: 100px;
+    box-sizing: border-box;
+  }
+  #advisor-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 20px;
+    gap: 20px;
+  }
+  #advisor-gender-select {
+    padding: 12px;
+    font-size: 16px;
+    border-radius: 8px;
+    border: 1px solid #ccc;
+    flex-grow: 1;
+  }
+  #advisor-submit-btn {
+    padding: 12px 30px;
+    font-size: 16px;
+    font-weight: 500;
+    background-color: #000000;
+    color: #ffffff;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background-color 0.3s;
+    flex-grow: 2;
+  }
+  #advisor-submit-btn:hover {
+    background-color: #333333;
+  }
+  #advisor-submit-btn:disabled {
+    background-color: #999;
+    cursor: not-allowed;
+  }
+  #advisor-results-container {
+    margin-top: 30px;
+    border-top: 1px solid #eee;
+    padding-top: 20px;
+  }
+  .advisor-result-item {
+    margin-bottom: 25px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #f5f5f5;
+  }
+  .advisor-result-item:last-child {
+    border-bottom: none;
+  }
+  .advisor-result-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 18px;
+    font-weight: 600;
+  }
+  .advisor-result-title {
+    color: #1a1a1a;
+  }
+  .advisor-result-score {
+    font-size: 14px;
+    font-weight: 500;
+    padding: 5px 10px;
+    border-radius: 15px;
+    background-color: #f0fdf4;
+    color: #16a34a;
+  }
+  .advisor-result-details {
+    font-size: 14px;
+    color: #555;
+    margin-top: 8px;
+    line-height: 1.6;
+  }
+  .advisor-result-tags span {
+      display: inline-block;
+      background-color: #f3f4f6;
+      color: #4b5563;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      margin-right: 6px;
+      margin-top: 8px;
+  }
+</style>
+
+<div id="advisor-container">
+  <h2 id="advisor-title">Akıllı Koku Danışmanı</h2>
+  <p id="advisor-subtitle">Hayalinizdeki anı veya duyguyu anlatın, size en uygun parfümü bulalım.</p>
+  
+  <textarea id="advisor-textarea" placeholder="Örn: Kumsalda ferah bir akşam... Veya: Ofis için kalıcı ve etkileyici bir koku arıyorum."></textarea>
+  
+  <div id="advisor-controls">
+    <select id="advisor-gender-select">
+      <option value="Hepsi">Hepsi</option>
+      <option value="Kadın">Kadın</option>
+      <option value="Erkek">Erkek</option>
+    </select>
+    <button id="advisor-submit-btn">Sana Uygun Kokuyu Bul</button>
+  </div>
+  
+  <div id="advisor-results-container"></div>
+</div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    // =====================================================
+    // BURAYA KENDİ API ADRESİNİZİ YAZIN
+    // Render.com'dan aldığınız URL'yi buraya yapıştırın
+    const API_URL = "https://sare-perfume-advisor.onrender.com/recommend";
+    // =====================================================
+
+    const queryInput = document.getElementById('advisor-textarea');
+    const genderSelect = document.getElementById('advisor-gender-select');
+    const submitBtn = document.getElementById('advisor-submit-btn');
+    const resultsContainer = document.getElementById('advisor-results-container');
+
+    submitBtn.addEventListener('click', function() {
+      const query = queryInput.value.trim();
+      const gender = genderSelect.value;
+
+      if (!query) {
+        alert('Lütfen bir şeyler yazın.');
+        return;
+      }
+
+      setLoadingState(true);
+
+      fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ query: query, gender: gender })
+      })
+      .then(response => {
+          if (!response.ok) {
+              throw new Error('HTTP error! status: ' + response.status);
+          }
+          return response.json();
+      })
+      .then(data => {
+        displayResults(data.recommendations);
+        setLoadingState(false);
+      })
+      .catch(error => {
+        console.error('API Hatası:', error);
+        resultsContainer.innerHTML = '<p style="color: red; text-align: center;">Bir hata oluştu. Lütfen daha sonra tekrar deneyin.</p>';
+        setLoadingState(false);
+      });
+    });
+
+    function setLoadingState(isLoading) {
+      if (isLoading) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Aranıyor...';
+        resultsContainer.innerHTML = '<p style="text-align: center;">Size en uygun kokular bulunuyor, lütfen bekleyin...</p>';
+      } else {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Sana Uygun Kokuyu Bul';
+      }
+    }
+
+    function displayResults(recommendations) {
+      if (!recommendations || recommendations.length === 0) {
+        resultsContainer.innerHTML = '<p style="text-align: center;">Bu tanıma uygun bir koku bulunamadı. Lütfen farklı bir şey deneyin.</p>';
+        return;
+      }
+
+      let html = '<h3>İşte Size Özel Öneriler:</h3>';
+      recommendations.forEach(function(rec) {
+        html += '<div class="advisor-result-item">';
+        html += '<div class="advisor-result-header">';
+        html += '<span class="advisor-result-title">' + rec['Ürün Kodu'] + ' - ' + rec['Parfüm Adı'] + '</span>';
+        html += '<span class="advisor-result-score">Uyum: ' + rec['Benzerlik Skoru'] + '%</span>';
+        html += '</div>';
+        html += '<div class="advisor-result-details">' + (rec['Açıklama'] || '') + '</div>';
+        html += '<div class="advisor-result-tags">';
+        if (rec['Koku Ailesi']) html += '<span>' + rec['Koku Ailesi'] + '</span>';
+        if (rec['Mevsim']) html += '<span>' + rec['Mevsim'] + '</span>';
+        if (rec['Ortam']) html += '<span>' + rec['Ortam'] + '</span>';
+        if (rec['Cinsiyet']) html += '<span>' + rec['Cinsiyet'] + '</span>';
+        html += '</div>';
+        html += '</div>';
+      });
+      resultsContainer.innerHTML = html;
+    }
+  });
+</script>
