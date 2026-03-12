@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""
+'''
 Parfüm Akıllı Eşleştirme Sistemi v2
 Sentence-Transformers (çok dilli) + GPT-4.1-mini kullanarak
 müşteri sorgularını en uygun parfümle eşleştirir.
@@ -9,11 +8,10 @@ Mimari:
 - Sorgu zenginleştirme: GPT-4.1-mini
 - Benzerlik: Kosinüs benzerliği
 - Üretim için: Gemini text-embedding-004 ile değiştirilebilir
-"""
+'''
 
 import pandas as pd
 import numpy as np
-import json
 import os
 import pickle
 import warnings
@@ -24,14 +22,15 @@ from openai import OpenAI
 
 client = OpenAI()
 
-EMBEDDINGS_FILE = '/home/ubuntu/upload/parfum_embeddings_v2.pkl'
-DATA_FILE = '/home/ubuntu/upload/parfum_zenginlestirilmis.csv'
+# Dosya yolları, bu script'in bulunduğu dizine göre ayarlandı
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+EMBEDDINGS_FILE = os.path.join(BASE_DIR, 'parfum_embeddings_v2.pkl')
+DATA_FILE = os.path.join(BASE_DIR, 'parfum_zenginlestirilmis.csv')
 
 # Çok dilli embedding modeli (Türkçe için optimize)
 print("Embedding modeli yükleniyor...")
 EMBEDDING_MODEL = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
 print("✓ Model hazır")
-
 
 def create_perfume_description(row):
     """Her parfüm için zengin bir metin açıklaması oluştur."""
@@ -56,7 +55,6 @@ def create_perfume_description(row):
             parts.append(f"{label}: {val}")
     
     return ". ".join(parts)
-
 
 def build_embedding_database():
     """Tüm parfümler için embedding vektörleri oluştur."""
@@ -101,7 +99,6 @@ def build_embedding_database():
     print(f"✓ {len(records)} parfüm embedding'i kaydedildi")
     return data
 
-
 def load_embedding_database():
     """Kaydedilmiş embedding veri tabanını yükle."""
     if not os.path.exists(EMBEDDINGS_FILE):
@@ -112,17 +109,15 @@ def load_embedding_database():
     print(f"✓ {len(data['records'])} parfüm embedding'i yüklendi")
     return data
 
-
 def cosine_similarity_matrix(query_vec, matrix):
     """Sorgu vektörü ile tüm parfüm vektörleri arasındaki benzerliği hesapla."""
     query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-10)
     matrix_norm = matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-10)
     return np.dot(matrix_norm, query_norm)
 
-
 def enrich_query_with_gpt(user_input):
     """GPT ile kullanıcı sorgusunu parfüm arama için zenginleştir."""
-    prompt = f"""Kullanıcı şunu söylüyor: "{user_input}"
+    prompt = f"""Kullanıcı şunu söylüyor: \"{user_input}\"
 
 Bu ifadeyi parfüm arama için zenginleştir. Şunları belirt:
 - Ortam/durum (kumsal, ofis, gece kulübü, vb.)
@@ -148,19 +143,13 @@ Sadece zenginleştirilmiş arama metnini yaz (2-3 cümle Türkçe), başka hiçb
         print(f"GPT zenginleştirme hatası: {e}")
         return user_input
 
-
 def find_best_matches(query, db_data, top_k=5, gender_filter=None):
     """En uygun parfümleri bul."""
-    # Sorgu embedding'i
     query_embedding = EMBEDDING_MODEL.encode([query])[0]
-    
     embeddings = db_data['embeddings']
     records = db_data['records']
-    
-    # Tüm benzerlikler
     similarities = cosine_similarity_matrix(query_embedding, embeddings)
     
-    # Cinsiyet filtresi uygula
     if gender_filter and gender_filter != 'Hepsi':
         for i, record in enumerate(records):
             cinsiyet = record['Cinsiyet'].strip()
@@ -169,7 +158,6 @@ def find_best_matches(query, db_data, top_k=5, gender_filter=None):
             elif gender_filter == 'Kadın' and cinsiyet not in ['Kadın', 'Unisex']:
                 similarities[i] = -1
     
-    # En yüksek benzerlikli indeksler
     top_indices = np.argsort(similarities)[::-1][:top_k]
     
     results = []
@@ -194,19 +182,9 @@ def find_best_matches(query, db_data, top_k=5, gender_filter=None):
     
     return results
 
-
 def smart_perfume_advisor(user_input, db_data, gender_filter=None, use_gpt_enrichment=True):
     """
     Akıllı parfüm danışmanı ana fonksiyonu.
-    
-    Args:
-        user_input: Kullanıcının metin/duygu girişi
-        db_data: Embedding veri tabanı
-        gender_filter: 'Erkek', 'Kadın', 'Unisex', 'Hepsi' veya None
-        use_gpt_enrichment: GPT ile sorgu zenginleştirme kullanılsın mı
-    
-    Returns:
-        (matches, enriched_query) tuple
     """
     if use_gpt_enrichment:
         enriched_query = enrich_query_with_gpt(user_input)
@@ -215,79 +193,4 @@ def smart_perfume_advisor(user_input, db_data, gender_filter=None, use_gpt_enric
     
     matches = find_best_matches(enriched_query, db_data, top_k=5, gender_filter=gender_filter)
     return matches, enriched_query
-
-
-def run_demo_tests(db_data):
-    """Demo test sorguları."""
-    test_cases = [
-        ("Kumsalda ferah bir akşam", None),
-        ("Romantik gece yemeği, zarif ve çekici", "Kadın"),
-        ("Ofis için hafif, profesyonel bir koku", "Erkek"),
-        ("Kışın sıcak ve samimi, odunsu", None),
-        ("Taze ve enerjik, spor sonrası", "Erkek"),
-        ("Çiçekli bahar bahçesi, hafif ve neşeli", "Kadın"),
-        ("Derin ve gizemli, gece kulübü", None),
-        ("Düğün için özel, unutulmaz", "Kadın"),
-        ("Doğa yürüyüşü, yeşil ve taze", None),
-        ("Şeker ve vanilya, tatlı ve sıcak", None),
-    ]
-    
-    print("\n" + "="*80)
-    print("AKILLI KOKU DANIŞMANI - DEMO TEST SONUÇLARI")
-    print("="*80)
-    
-    all_results = []
-    
-    for query, gender in test_cases:
-        print(f"\n🔍 Sorgu: '{query}'")
-        if gender:
-            print(f"   Cinsiyet filtresi: {gender}")
-        
-        matches, enriched = smart_perfume_advisor(query, db_data, gender)
-        
-        print(f"   Zenginleştirilmiş: {enriched[:80]}...")
-        print(f"\n   Top 5 Öneri:")
-        
-        for i, m in enumerate(matches, 1):
-            print(f"   {i}. [{m['Ürün Kodu']}] {m['Parfüm Adı']}")
-            print(f"      Benzerlik: %{m['Benzerlik Skoru']} | {m['Cinsiyet']} | {m['Koku Ailesi']}")
-            if i == 1:
-                print(f"      Mevsim: {m['Mevsim']}")
-                print(f"      Ortam: {m['Ortam']}")
-                print(f"      Açıklama: {m['Açıklama'][:80]}...")
-        
-        all_results.append({
-            'Sorgu': query,
-            'Cinsiyet Filtresi': gender or 'Hepsi',
-            'Zenginleştirilmiş Sorgu': enriched,
-            '1. Öneri Kodu': matches[0]['Ürün Kodu'] if matches else '',
-            '1. Öneri Adı': matches[0]['Parfüm Adı'] if matches else '',
-            '1. Benzerlik': matches[0]['Benzerlik Skoru'] if matches else 0,
-            '2. Öneri Kodu': matches[1]['Ürün Kodu'] if len(matches) > 1 else '',
-            '2. Öneri Adı': matches[1]['Parfüm Adı'] if len(matches) > 1 else '',
-            '3. Öneri Kodu': matches[2]['Ürün Kodu'] if len(matches) > 2 else '',
-            '3. Öneri Adı': matches[2]['Parfüm Adı'] if len(matches) > 2 else '',
-        })
-    
-    # Kaydet
-    df_results = pd.DataFrame(all_results)
-    df_results.to_csv('/home/ubuntu/upload/demo_test_sonuclari.csv', index=False, encoding='utf-8-sig')
-    print(f"\n✓ Sonuçlar kaydedildi: /home/ubuntu/upload/demo_test_sonuclari.csv")
-    
-    return all_results
-
-
-if __name__ == "__main__":
-    print("="*60)
-    print("SARE PERFUME - AKILLI KOK DANIŞMANI SİSTEMİ")
-    print("="*60)
-    
-    # Veri tabanını oluştur
-    db_data = build_embedding_database()
-    
-    # Demo testleri çalıştır
-    results = run_demo_tests(db_data)
-    
-    print("\n" + "="*60)
-    print(f"✓ Sistem hazır! {len(db_data['records'])} parfüm indekslendi.")
-    print("="*60)
+'''
