@@ -1,9 +1,4 @@
 Flask
 flask-cors
-numpy
-pandas
-openai
-sentence-transformers
-torch
-transformers
+google-generativeai
 gunicorn
