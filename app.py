@@ -4,36 +4,30 @@ import json
 import base64
 import re
 import logging
+import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-from google import genai
-from google.genai import types
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
-
+logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 CORS(app)
 
+# --- AYARLAR ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 CSV_NAME = 'products_export_1 (2).csv'
 STORE_URL = "https://sareperfume.com/products/"
 
-client = None
-if GEMINI_API_KEY:
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-    except Exception as e:
-        logging.error(f"API Hatası: {e}")
-
 PRODUCT_DB = {}
 CATALOG_TEXT = ""
+
+def clean_html(raw):
+    if not raw: return ""
+    return re.sub(r'<.*?>', ' ', raw).replace('\n', ' ').strip()
 
 def load_data():
     global PRODUCT_DB, CATALOG_TEXT
     path = os.path.join(os.path.dirname(__file__), CSV_NAME)
     if not os.path.exists(path): return
-    
     lines = []
     try:
         with open(path, mode='r', encoding='utf-8-sig') as f:
@@ -47,81 +41,59 @@ def load_data():
                         "image": row.get('Image Src', '') or "https://via.placeholder.com/200",
                         "url": f"{STORE_URL}{h}"
                     }
-                    desc = re.sub(r'<.*?>', ' ', row.get('Body (HTML)', '')).replace('\n', ' ').strip()
-                    lines.append(f"KİMLİK: {h} | AD: {t} | ETİKET: {row.get('Tags', '')} | ÖZET: {desc[:150]}")
+                    desc = clean_html(row.get('Body (HTML)', ''))
+                    lines.append(f"KİMLİK: {h} | AD: {t} | ÖZET: {desc[:100]}")
         CATALOG_TEXT = "\n".join(lines)
     except Exception as e:
-        logging.error(f"Katalog Hatası: {e}")
+        logging.error(f"Katalog hatası: {e}")
 
 load_data()
 
 @app.route("/recommend", methods=["POST"])
 def recommend():
-    if not client:
-        return jsonify({"error": "API Key bulunamadı."}), 200
-
+    if not GEMINI_API_KEY:
+        return jsonify({"error": "API Key eksik."}), 200
     try:
         data = request.get_json()
         query = data.get("query", "").strip()
         img = data.get("image", None)
 
-        if not query and not img:
-            return jsonify({"error": "Lütfen yazı yazın veya fotoğraf ekleyin."}), 400
-
+        # --- SAMİMİ UZMAN PROMPTU ---
         prompt = (
-            "Sen son derece samimi, karizmatik ve insan sarrafı bir niş parfüm danışmanısın. "
-            "Sanki müşteri mağazana gelmiş ve karşılıklı kahve içiyormuşsunuz gibi sıcak, senli-benli bir dille konuş.\n"
+            "Sen seçkin bir niş parfüm butiğinde çalışan, işini çok iyi bilen ama müşterisiyle çok samimi ve içten konuşan bir uzmansın.\n"
             f"Katalog:\n{CATALOG_TEXT}\n\n"
-            "GÖREV:\n"
-            "1. Fotoğraf geldiyse: Bu bir ev selfie'si, boydan fotoğraf veya sadece bir yüz olabilir. Hiç fark etmez. "
-            "Kişinin saç/göz rengine, gülüşüne, giyimine veya o anki rahat ortamına bakarak enerjisini hisset.\n"
-            "2. Katalogdan en uygun 3 parfümü seç.\n\n"
-            "ÜSLUP KURALI:\n"
-            "ASLA sıkıcı katalog veya reklam metni yazma ('mükemmel uyum sağlar', 'taçlandırır' gibi klişeler YASAK!). "
-            "Doğrudan fotoğraftaki/yazıdaki bir detaya vur. Örnek: 'Evdeki o cool havanı hissettim. Senin gibi esmer tenli ve sıcak gülüşlü birine odunsu bir şeyler lazım...'\n\n"
-            "YANIT SADECE JSON OLMALIDIR:\n"
-            '{"recommendations": [{"kimlik": "Handle degeri", "aciklama": "Sıcak ve doğal 2-3 cümlelik analiz."}]}'
+            "GÖREV: Fotoğraf ev ortamında bir selfie bile olsa, kişinin enerjisine ve o anki havasına bakarak 3 parfüm seç.\n"
+            "ÜSLUP: ASLA 'notalar, paçuli, zarafetinizi taçlandırır' gibi sıkıcı reklam kelimeleri kullanma. "
+            "Sanki dükkanda karşılıklı kahve içiyormuşsunuz gibi doğal ve reklamsız konuş.\n"
+            "YANIT: Sadece JSON formatında cevap ver: "
+            '{"recommendations": [{"kimlik": "Handle", "aciklama": "Samimi 2 cümlelik analiz"}]}'
         )
 
-        contents = [prompt]
-        if query: contents.append(f"Müşteri Talebi: {query}")
+        # REST API (DOĞRUDAN BAĞLANTI)
+        parts = [{"text": prompt}]
+        if query: parts.append({"text": query})
         if img:
-            img_data = img.split(",")[1] if "," in img else img
-            contents.append(
-                types.Part.from_bytes(data=base64.b64decode(img_data), mime_type='image/jpeg')
-            )
+            parts.append({"inlineData": {"mimeType": "image/jpeg", "data": img.split(",")[1] if "," in img else img}})
 
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=contents,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        resp = requests.post(url, json={"contents": [{"parts": parts}], "generationConfig": {"responseMimeType": "application/json"}}, timeout=30)
         
-        raw_text = response.text.strip()
-        start_idx = raw_text.find('{')
-        end_idx = raw_text.rfind('}')
-        if start_idx != -1 and end_idx != -1:
-            raw_text = raw_text[start_idx:end_idx+1]
-            
-        res_json = json.loads(raw_text)
+        raw_text = resp.json()['candidates'][0]['content']['parts'][0]['text']
+        res_data = json.loads(raw_text[raw_text.find('{'):raw_text.rfind('}')+1])
         
-        final_list = []
-        for r in res_json.get("recommendations", []):
+        final = []
+        for r in res_data.get("recommendations", []):
             h = r.get("kimlik", "").strip()
             if h in PRODUCT_DB:
-                product = PRODUCT_DB[h]
-                final_list.append({
-                    "title": product["title"],
-                    "url": product["url"],
-                    "image": product["image"],
-                    "description": r.get("aciklama", "Bu koku tam sana göre.")
+                final.append({
+                    "title": PRODUCT_DB[h]["title"],
+                    "url": PRODUCT_DB[h]["url"],
+                    "image": PRODUCT_DB[h]["image"],
+                    "description": r.get("aciklama", "Harika bir seçim.")
                 })
-        
-        return jsonify({"recommendations": final_list})
-
+        return jsonify({"recommendations": final})
     except Exception as e:
-        logging.error(f"Hata: {e}")
-        return jsonify({"error": f"Sistem Hatası: {str(e)}"}), 200
+        return jsonify({"error": str(e)}), 200
 
 @app.route("/")
 def home(): return "Sare API Aktif!"
