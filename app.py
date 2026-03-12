@@ -1,96 +1,110 @@
-#!/usr/bin/env python3
-"""
-Sare Perfume - Akıllı Koku Danışmanı API Sunucusu
-
-Bu Flask sunucusu, Shopify mağazası için bir API endpoint sağlar.
-Kullanıcı sorgularını alır, embedding sistemiyle en iyi parfümleri bulur
-ve sonuçları JSON formatında döndürür.
-
-Endpoint: /recommend
-Method: POST
-JSON Body: {
-    "query": "Kullanıcının yazdığı metin",
-    "gender": "Erkek" | "Kadın" | "Hepsi"
-}
-"""
-
 import os
-import warnings
+import csv
+import json
+import base64
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-
-# Uyarıları bastır
-warnings.filterwarnings("ignore")
-
-# Embedding sistemini import et
-# Bu dosyanın aynı dizinde olduğundan emin olun
-import parfum_embedding_v2 as perfume_system
+import google.generativeai as genai
 
 app = Flask(__name__)
-
-# Geliştirme ortamında tüm kaynaklardan gelen isteklere izin ver
 CORS(app)
 
-# --- VERİ TABANINI YÜKLE ---
-# Sunucu başladığında embedding veritabanını bir kere yükle
-print("Akıllı Koku Danışmanı API başlatılıyor...")
-DB_DATA = None
+# --- GEMINI API AYARI ---
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    print("UYARI: GEMINI_API_KEY bulunamadı! Vercel ayarlarına ekleyin.")
+
+# --- PARFÜM KATALOĞUNU HAFIZAYA AL (Tüy gibi hafif) ---
+PERFUME_CATALOG = ""
 try:
-    DB_DATA = perfume_system.load_embedding_database()
-    print("✓ API kullanıma hazır!")
+    with open('parfum_zenginlestirilmis.csv', mode='r', encoding='utf-8-sig') as file:
+        reader = csv.DictReader(file)
+        catalog_lines = []
+        for row in reader:
+            kod = row.get('Benim Kodum', row.get('Ürün Kodu', ''))
+            isim = row.get('Orijinal Ad', row.get('Parfüm Adı', ''))
+            cinsiyet = row.get('Cinsiyet', '')
+            ailesi = row.get('Koku Ailesi', '')
+            notalar = f"Üst: {row.get('Üst Notalar','')}, Orta: {row.get('Orta Notalar','')}, Alt: {row.get('Alt Notalar','')}"
+            mevsim = row.get('Mevsim', '')
+            ortam = row.get('Ortam', '')
+            line = f"KOD: {kod} | İSİM: {isim} | CİNSİYET: {cinsiyet} | AİLE: {ailesi} | NOTALAR: {notalar} | MEVSİM: {mevsim} | ORTAM: {ortam}"
+            catalog_lines.append(line)
+        PERFUME_CATALOG = "\n".join(catalog_lines)
+        print(f"✓ {len(catalog_lines)} parfüm tüy gibi hafif şekilde belleğe yüklendi.")
 except Exception as e:
-    print(f"HATA: Embedding veritabanı yüklenemedi: {e}")
-    print("Lütfen 'parfum_zenginlestirilmis.csv' ve 'parfum_embeddings_v2.pkl' dosyalarının mevcut olduğundan emin olun.")
+    print(f"Katalog yüklenirken hata oluştu: {e}")
 
-
+# --- ANA MOTOR (MULTIMODAL) ---
 @app.route("/recommend", methods=["POST"])
 def recommend():
-    """Parfüm önerisi yapan ana API endpointi."""
-    if not DB_DATA:
-        return jsonify({"error": "Sistem hazır değil, lütfen sunucu loglarını kontrol edin."}), 500
-
     data = request.get_json()
-    if not data or "query" not in data:
-        return jsonify({"error": "'query' alanı zorunludur."}), 400
+    user_query = data.get("query", "") # Yazı
+    image_base64 = data.get("image", None) # Fotoğraf (base64)
 
-    user_query = data["query"]
-    gender_filter = data.get("gender", "Hepsi") # Varsayılan 'Hepsi'
+    if not user_query and not image_base64:
+        return jsonify({"error": "Sorgu boş olamaz (Yazı veya fotoğraf gereklidir)."}), 400
 
-    if not user_query:
-        return jsonify({"error": "Sorgu boş olamaz."}), 400
+    print(f"Müşteri arıyor: Yazı: '{user_query[:50]}...', Fotoğraf: {'Var' if image_base64 else 'Yok'}")
 
-    print(f"Gelen sorgu: '{user_query}', Cinsiyet: {gender_filter}")
+    # Gemini'ye gönderilecek talimat
+    prompt = f"""
+    Sen uzman bir parfüm danışmanısın. Aşağıda Sare Perfume mağazasındaki parfümlerin kataloğu var:
+    
+    {PERFUME_CATALOG}
+    
+    Görev: Müşterinin verdiği bilgileri (ister yazı ister fotoğraf olsun) analiz et. 
+    Fotoğraf varsa, şişenin şeklini, rengini veya fotoğraftaki objelerin (kumsal, elbise, vs.) hissiyatını anla.
+    Mağazadaki kataloğumuzdan bu hissiyata ve isteğe en uygun 3 parfümü seç.
+    
+    Yanıtını aşağıdaki JSON formatında ver:
+    {{
+        "analysis_summary": "Kullanıcının isteği/fotoğrafının kısa analizi",
+        "recommendations": [
+            {{
+                "Ürün Kodu": "Parfüm kodu",
+                "Parfüm Adı": "Parfüm adı",
+                "Cinsiyet": "Cinsiyeti",
+                "Koku Ailesi": "Ailesi",
+                "Mevsim": "Uygun Mevsim",
+                "Ortam": "Uygun Ortam",
+                "Açıklama": "Müşteriye bu parfümü neden önerdiğini anlatan 1-2 cümlelik şık, profesyonel bir sunum."
+            }}
+        ]
+    }}
+    """
+
+    # Model içeriği hazırla
+    content = [prompt]
+    
+    # Fotoğraf varsa, base64'ü Gemini formatına çevir
+    if image_base64:
+        # base64'ün başındaki 'data:image/png;base64,' kısmını temizle
+        if "," in image_base64:
+            header, image_data = image_base64.split(",", 1)
+        else:
+            image_data = image_base64
+            
+        content.append({
+            "mime_type": "image/jpeg", # veya png, flash otomatik anlar
+            "data": image_data
+        })
 
     try:
-        # Akıllı danışmanı çalıştır (GPT zenginleştirmesi ile)
-        matches, enriched_query = perfume_system.smart_perfume_advisor(
-            user_input=user_query,
-            db_data=DB_DATA,
-            gender_filter=gender_filter,
-            use_gpt_enrichment=True
-        )
-
-        response = {
-            "enriched_query": enriched_query,
-            "recommendations": matches
-        }
-
-        return jsonify(response)
-
+        model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+        response = model.generate_content(content)
+        result_json = json.loads(response.text)
+        return jsonify(result_json)
     except Exception as e:
-        print(f"İşlem sırasında hata: {e}")
-        return jsonify({"error": "Öneri yapılırken bir sunucu hatası oluştu."}), 500
-
+        print(f"Gemini API Hatası: {e}")
+        return jsonify({"error": "Sistemde anlık bir yoğunluk var, lütfen tekrar deneyin."}), 500
 
 @app.route("/")
 def health_check():
-    """Sunucunun ayakta olup olmadığını kontrol etmek için basit bir endpoint."""
-    status = "Hazır" if DB_DATA else "Başlatılıyor"
-    return f"Sare Perfume Akıllı Koku Danışmanı API - Durum: {status}"
-
+    return "Sare Perfume Akıllı Koku Danışmanı (Gemini API Altyapısı) - Canlı ve Tüy Gibi Hafif!"
 
 if __name__ == "__main__":
-    # Geliştirme sunucusu. Üretim ortamı için Gunicorn gibi bir WSGI sunucusu kullanın.
-    # Örnek: gunicorn --workers=1 --threads=4 --bind 0.0.0.0:8080 app:app
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
