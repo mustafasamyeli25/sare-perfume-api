@@ -99,7 +99,7 @@ def recommend():
         
     except Exception as e:
         # Hata olursa artık 500 dönüp gizlemeyeceğiz, hatanın adını ekrana yansıtacağız!
-        return jsonify({"error": f"Sistem Hatası: {str(e)}"}), 500
+        return jsonify({"error": f"Sistem Hatası: {str(e)}"}), 200
 
 @app.route("/")
 def health_check():
