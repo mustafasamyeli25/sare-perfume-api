@@ -27,7 +27,7 @@ def clean_html(raw_html):
 
 try:
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    # GitHub'a yüklediğin dosyanın tam adı (Birebir aynı olmalı)
+    # GitHub'a yüklediğin dosyanın tam adı
     csv_path = os.path.join(current_dir, 'products_export_1 (2).csv')
     
     catalog_lines = []
@@ -50,7 +50,7 @@ try:
                     "url": f"https://sareperfume.com/products/{handle}"
                 }
                 
-                # Yapay zekaya sadece özet bilgi veriyoruz (Tüy gibi hafifletiyoruz)
+                # Yapay zekaya sadece özet bilgi veriyoruz
                 line = f"KİMLİK: {handle} | İSİM: {title} | ETİKETLER: {tags} | DETAY: {body[:300]}"
                 catalog_lines.append(line)
                 
@@ -71,7 +71,7 @@ def recommend():
         if not user_query and not image_base64:
             return jsonify({"error": "Lütfen bir metin yazın veya fotoğraf yükleyin."}), 400
 
-        prompt = f"""
+        # İŞTE BURASI YENİ YÜKSEK ZEKALI SHERLOCK HOLMES KISMI
         prompt = f"""
         Sen dünyaca ünlü, insan psikolojisinden ve görünümünden çok iyi anlayan elit bir koku uzmanısın (Master Perfumer).
         Aşağıda Sare Perfume mağazasındaki ürünlerin kataloğu var:
@@ -126,11 +126,4 @@ def recommend():
                     "description": rec.get("aciklama", "")
                 })
                 
-        return jsonify({"recommendations": final_results})
-        
-    except Exception as e:
-        return jsonify({"error": f"Sistem Hatası: {str(e)}"}), 200
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+        return
