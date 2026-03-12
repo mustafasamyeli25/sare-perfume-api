@@ -14,12 +14,16 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 else:
-    print("UYARI: GEMINI_API_KEY bulunamadı! Vercel ayarlarına ekleyin.")
+    print("UYARI: GEMINI_API_KEY bulunamadı!")
 
-# --- PARFÜM KATALOĞUNU HAFIZAYA AL (Tüy gibi hafif) ---
+# --- PARFÜM KATALOĞUNU HAFIZAYA AL (Vercel Uyumlu Dosya Yolu) ---
 PERFUME_CATALOG = ""
 try:
-    with open('parfum_zenginlestirilmis.csv', mode='r', encoding='utf-8-sig') as file:
+    # Dosyanın Vercel'de tam nerede olduğunu bul
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_path = os.path.join(current_dir, 'parfum_zenginlestirilmis.csv')
+    
+    with open(csv_path, mode='r', encoding='utf-8-sig') as file:
         reader = csv.DictReader(file)
         catalog_lines = []
         for row in reader:
@@ -33,77 +37,73 @@ try:
             line = f"KOD: {kod} | İSİM: {isim} | CİNSİYET: {cinsiyet} | AİLE: {ailesi} | NOTALAR: {notalar} | MEVSİM: {mevsim} | ORTAM: {ortam}"
             catalog_lines.append(line)
         PERFUME_CATALOG = "\n".join(catalog_lines)
-        print(f"✓ {len(catalog_lines)} parfüm tüy gibi hafif şekilde belleğe yüklendi.")
 except Exception as e:
-    print(f"Katalog yüklenirken hata oluştu: {e}")
+    PERFUME_CATALOG = f"HATA: Katalog okunamadı. Detay: {str(e)}"
 
 # --- ANA MOTOR (MULTIMODAL) ---
 @app.route("/recommend", methods=["POST"])
 def recommend():
-    data = request.get_json()
-    user_query = data.get("query", "") # Yazı
-    image_base64 = data.get("image", None) # Fotoğraf (base64)
-
-    if not user_query and not image_base64:
-        return jsonify({"error": "Sorgu boş olamaz (Yazı veya fotoğraf gereklidir)."}), 400
-
-    print(f"Müşteri arıyor: Yazı: '{user_query[:50]}...', Fotoğraf: {'Var' if image_base64 else 'Yok'}")
-
-    # Gemini'ye gönderilecek talimat
-    prompt = f"""
-    Sen uzman bir parfüm danışmanısın. Aşağıda Sare Perfume mağazasındaki parfümlerin kataloğu var:
-    
-    {PERFUME_CATALOG}
-    
-    Görev: Müşterinin verdiği bilgileri (ister yazı ister fotoğraf olsun) analiz et. 
-    Fotoğraf varsa, şişenin şeklini, rengini veya fotoğraftaki objelerin (kumsal, elbise, vs.) hissiyatını anla.
-    Mağazadaki kataloğumuzdan bu hissiyata ve isteğe en uygun 3 parfümü seç.
-    
-    Yanıtını aşağıdaki JSON formatında ver:
-    {{
-        "analysis_summary": "Kullanıcının isteği/fotoğrafının kısa analizi",
-        "recommendations": [
-            {{
-                "Ürün Kodu": "Parfüm kodu",
-                "Parfüm Adı": "Parfüm adı",
-                "Cinsiyet": "Cinsiyeti",
-                "Koku Ailesi": "Ailesi",
-                "Mevsim": "Uygun Mevsim",
-                "Ortam": "Uygun Ortam",
-                "Açıklama": "Müşteriye bu parfümü neden önerdiğini anlatan 1-2 cümlelik şık, profesyonel bir sunum."
-            }}
-        ]
-    }}
-    """
-
-    # Model içeriği hazırla
-    content = [prompt]
-    
-    # Fotoğraf varsa, base64'ü Gemini formatına çevir
-    if image_base64:
-        # base64'ün başındaki 'data:image/png;base64,' kısmını temizle
-        if "," in image_base64:
-            header, image_data = image_base64.split(",", 1)
-        else:
-            image_data = image_base64
-            
-        content.append({
-            "mime_type": "image/jpeg", # veya png, flash otomatik anlar
-            "data": image_data
-        })
-
     try:
+        data = request.get_json()
+        user_query = data.get("query", "")
+        image_base64 = data.get("image", None)
+
+        if not user_query and not image_base64:
+            return jsonify({"error": "Lütfen bir metin yazın veya fotoğraf yükleyin."}), 400
+
+        prompt = f"""
+        Sen uzman bir parfüm danışmanısın. Aşağıda Sare Perfume mağazasındaki parfümlerin kataloğu var:
+        
+        {PERFUME_CATALOG}
+        
+        Görev: Müşterinin verdiği bilgileri (ister yazı ister fotoğraf olsun) analiz et.
+        Mağazadaki kataloğumuzdan bu isteğe en uygun 3 parfümü seç.
+        
+        Yanıtını SADECE AŞAĞIDAKİ JSON FORMATINDA ver. Başına veya sonuna ```json gibi işaretler KOYMA:
+        {{
+            "recommendations": [
+                {{
+                    "Ürün Kodu": "Parfüm kodu",
+                    "Parfüm Adı": "Parfüm adı",
+                    "Cinsiyet": "Cinsiyeti",
+                    "Koku Ailesi": "Ailesi",
+                    "Mevsim": "Uygun Mevsim",
+                    "Ortam": "Uygun Ortam",
+                    "Açıklama": "Müşteriye bu parfümü neden önerdiğini anlatan 1-2 cümlelik şık bir sunum."
+                }}
+            ]
+        }}
+        """
+
+        content = [prompt]
+        
+        if image_base64:
+            if "," in image_base64:
+                header, image_data = image_base64.split(",", 1)
+            else:
+                image_data = image_base64
+                
+            content.append({
+                "mime_type": "image/jpeg",
+                "data": image_data
+            })
+
         model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
         response = model.generate_content(content)
-        result_json = json.loads(response.text)
+        
+        # Gemini'nin olası markdown (```json) işaretlerini zorla temizle
+        clean_response = response.text.replace("```json", "").replace("```", "").strip()
+        
+        result_json = json.loads(clean_response)
         return jsonify(result_json)
+        
     except Exception as e:
-        print(f"Gemini API Hatası: {e}")
-        return jsonify({"error": "Sistemde anlık bir yoğunluk var, lütfen tekrar deneyin."}), 500
+        # Hata olursa artık 500 dönüp gizlemeyeceğiz, hatanın adını ekrana yansıtacağız!
+        return jsonify({"error": f"Sistem Hatası: {str(e)}"}), 500
 
 @app.route("/")
 def health_check():
-    return "Sare Perfume Akıllı Koku Danışmanı (Gemini API Altyapısı) - Canlı ve Tüy Gibi Hafif!"
+    return "Sare Perfume API - Aktif!"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
