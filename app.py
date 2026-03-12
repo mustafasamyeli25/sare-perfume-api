@@ -6,11 +6,11 @@ import re
 import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-
-# STABİL VE GÜVENİLİR KÜTÜPHANE
 import google.generativeai as genai
 
+# Logları aktif edelim
 logging.basicConfig(level=logging.INFO)
+
 app = Flask(__name__)
 CORS(app)
 
@@ -22,9 +22,8 @@ STORE_URL = "https://sareperfume.com/products/"
 # Gemini Yapılandırması
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    logging.info("Gemini API Yapılandırması Başarılı.")
 
-# --- VERİ YÜKLEME ---
+# --- KATALOG VERİLERİ ---
 PRODUCT_DB = {}
 CATALOG_TEXT = ""
 
@@ -36,7 +35,7 @@ def load_data():
     global PRODUCT_DB, CATALOG_TEXT
     path = os.path.join(os.path.dirname(__file__), CSV_NAME)
     if not os.path.exists(path):
-        logging.error("CSV Dosyası Bulunamadı!")
+        logging.error(f"HATA: {CSV_NAME} bulunamadı!")
         return
 
     lines = []
@@ -52,9 +51,9 @@ def load_data():
                         "image": row.get('Image Src', '') or "https://via.placeholder.com/200",
                         "url": f"{STORE_URL}{h}"
                     }
-                    lines.append(f"KOD: {h} | ÜRÜN: {t} | ETİKETLER: {row.get('Tags', '')}")
+                    lines.append(f"KOD: {h} | AD: {t}")
         CATALOG_TEXT = "\n".join(lines)
-        logging.info(f"Katalog Yüklendi: {len(PRODUCT_DB)} ürün.")
+        logging.info("Katalog yüklendi.")
     except Exception as e:
         logging.error(f"Veri yükleme hatası: {e}")
 
@@ -70,21 +69,21 @@ def recommend():
         query = data.get("query", "").strip()
         img = data.get("image", None)
 
-        if not query and not img:
-            return jsonify({"error": "Lütfen bir veri girin."}), 400
-
         # Sherlock Holmes Prompt
         prompt = (
-            "Sen elit bir koku danışmanısın. Kataloğumuz aşağıdadır:\n"
+            "Sen elit bir koku danışmanısın. Katalog:\n"
             f"{CATALOG_TEXT}\n\n"
-            "GÖREV: Müşterinin tarzını, mesleğini ve (fotoğraf varsa) ten rengini analiz et. "
-            "En uygun 3 parfümü seç. Yanıtı SADECE bu JSON yapısında ver:\n"
-            '{"recommendations": [{"kimlik": "Handle degeri", "analiz": "2 cümlelik kişiye özel analiz"}]}'
+            "Müşteriyi analiz et ve en uygun 3 parfümü seç. "
+            "Yanıtı SADECE bu JSON yapısında ver:\n"
+            '{"recommendations": [{"kimlik": "Handle", "analiz": "Yorum"}]}'
         )
 
-        content = [prompt]
-        if query: content.append(f"Müşteri Talebi: {query}")
+        # 404 HATASINI ÇÖZEN KRİTİK MODEL TANIMI
+        # 'gemini-1.5-flash' yerine bazen 'models/gemini-1.5-flash' gerekir
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
+        content = [prompt]
+        if query: content.append(f"Talep: {query}")
         if img:
             img_data = img.split(",")[1] if "," in img else img
             content.append({
@@ -92,13 +91,17 @@ def recommend():
                 "data": base64.b64decode(img_data)
             })
 
-        # 404 HATASINI BİTİREN STABİL ÇAĞRI
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # Yanıtı al
         response = model.generate_content(content)
         
-        # Yanıtı işle
-        raw_json = response.text.replace("```json", "").replace("```", "").strip()
-        res_data = json.loads(raw_json)
+        # JSON temizleme
+        txt = response.text.strip()
+        if "```json" in txt:
+            txt = txt.split("```json")[1].split("```")[0].strip()
+        elif "```" in txt:
+            txt = txt.split("```")[1].split("```")[0].strip()
+            
+        res_data = json.loads(txt)
         
         final_list = []
         for r in res_data.get("recommendations", []):
@@ -114,11 +117,11 @@ def recommend():
         return jsonify({"recommendations": final_list})
 
     except Exception as e:
-        logging.error(f"Sistem Hatası: {e}")
-        return jsonify({"error": f"Bir hata oluştu: {str(e)}"}), 200
+        logging.error(f"Hata: {e}")
+        return jsonify({"error": f"Sistem hatası: {str(e)}"}), 200
 
 @app.route("/")
-def home(): return "Sare Perfume API v5.0 (Stable) - Aktif!"
+def home(): return "Sare API Aktif!"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
