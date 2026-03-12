@@ -24,7 +24,7 @@ if GEMINI_API_KEY:
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
     except Exception as e:
-        logging.error(f"API Hatası: {e}")
+        logging.error(f"API Hatasi: {e}")
 
 PRODUCT_DB = {}
 CATALOG_TEXT = ""
@@ -48,17 +48,17 @@ def load_data():
                         "url": f"{STORE_URL}{h}"
                     }
                     desc = re.sub(r'<.*?>', ' ', row.get('Body (HTML)', '')).replace('\n', ' ').strip()
-                    lines.append(f"KİMLİK: {h} | AD: {t} | ETİKET: {row.get('Tags', '')} | ÖZET: {desc[:150]}")
+                    lines.append(f"KIMLIK: {h} | AD: {t} | ETIKET: {row.get('Tags', '')} | OZET: {desc[:150]}")
         CATALOG_TEXT = "\n".join(lines)
     except Exception as e:
-        logging.error(f"Katalog Hatası: {e}")
+        logging.error(f"Katalog Hatasi: {e}")
 
 load_data()
 
 @app.route("/recommend", methods=["POST"])
 def recommend():
     if not client:
-        return jsonify({"error": "API Key bulunamadı."}), 200
+        return jsonify({"error": "API Key bulunamadi."}), 200
 
     try:
         data = request.get_json()
@@ -66,37 +66,58 @@ def recommend():
         img = data.get("image", None)
 
         if not query and not img:
-            return jsonify({"error": "Lütfen yazı yazın veya fotoğraf ekleyin."}), 400
+            return jsonify({"error": "Lutfen yazi yazin veya fotograf ekleyin."}), 400
 
+        # --- SAMİMİ AMA PROFESYONEL BUTİK UZMANI PROMPTU ---
         prompt = (
-            "Sen son derece samimi, karizmatik ve insan sarrafı bir niş parfüm danışmanısın. "
-            "Sanki müşteri mağazana gelmiş ve karşılıklı kahve içiyormuşsunuz gibi sıcak, senli-benli bir dille konuş.\n"
+            "Sen seçkin, son derece sicakkanli ve insan sarrafi bir luks parfum danismanisin. "
+            "Musterinle aranda profesyonel ama cok icten, guven veren bir bag var.\n"
             f"Katalog:\n{CATALOG_TEXT}\n\n"
-            "GÖREV:\n"
-            "1. Fotoğraf geldiyse: Bu bir ev selfie'si, boydan fotoğraf veya sadece bir yüz olabilir. Hiç fark etmez. "
-            "Kişinin saç/göz rengine, gülüşüne, giyimine veya o anki rahat ortamına bakarak enerjisini hisset.\n"
-            "2. Katalogdan en uygun 3 parfümü seç.\n\n"
-            "ÜSLUP KURALI:\n"
-            "ASLA sıkıcı katalog veya reklam metni yazma ('mükemmel uyum sağlar', 'taçlandırır' gibi klişeler YASAK!). "
-            "Doğrudan fotoğraftaki/yazıdaki bir detaya vur. Örnek: 'Evdeki o cool havanı hissettim. Senin gibi esmer tenli ve sıcak gülüşlü birine odunsu bir şeyler lazım...'\n\n"
-            "YANIT SADECE JSON OLMALIDIR:\n"
-            '{"recommendations": [{"kimlik": "Handle degeri", "aciklama": "Sıcak ve doğal 2-3 cümlelik analiz."}]}'
+            "GOREV:\n"
+            "1. Fotografa bak (ev hali, ofis, sokak veya sadece bir yuz olabilir). Illaki meslek arama! "
+            "Kisinin enerjisine, bakisina, gulusune veya o anki ortaminin havasina odaklan.\n"
+            "2. Ona katalogdan en uygun 3 parfumu sec.\n\n"
+            "USLUP KURALLARI:\n"
+            "- ASLA 'zarafetinizi taclandirir, mukemmel uyum saglar, notalari soyledir' gibi yapmacik ve sikici reklamci kelimeleri KULLANMA!\n"
+            "- 'Kanka' agziyla konusma; saygili ama sicak ve dogal bir dil kullan.\n"
+            "- Ornek tarz: 'Ev ortamindaki o huzurlu ve dogal enerjinizi hissettim. Bu dinginlige bu kokunun sicakligi cok yakisacaktir...' veya 'Gozlerinizdeki o derin bakisi bu iddiali kokuyla tamamlamak istedim...'\n\n"
+            "YANIT SADECE ASAGIDAKI JSON OLMALIDIR:\n"
+            '{"recommendations": [{"kimlik": "Handle degeri", "aciklama": "Sicak, icten ve reklamsiz 2 cumlelik ozel analiz."}]}'
         )
 
         contents = [prompt]
-        if query: contents.append(f"Müşteri Talebi: {query}")
+        if query: contents.append(f"Musteri Talebi: {query}")
         if img:
             img_data = img.split(",")[1] if "," in img else img
             contents.append(
                 types.Part.from_bytes(data=base64.b64decode(img_data), mime_type='image/jpeg')
             )
 
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=contents,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
+        # --- OTOMATİK MODEL GEÇİŞİ (KOTA DOLARSA ÇÖKMESİN DİYE) ---
+        # En yüksek kotası olan modelden başlayarak dener.
+        fallback_models = [
+            'gemini-1.5-flash',
+            'gemini-2.0-flash',
+            'gemini-1.5-pro'
+        ]
         
+        response = None
+        for m in fallback_models:
+            try:
+                response = client.models.generate_content(
+                    model=m,
+                    contents=contents,
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                break
+            except Exception as e:
+                logging.warning(f"{m} modeli basarisiz oldu, digerine geciliyor. Hata: {e}")
+                continue
+                
+        if not response:
+            return jsonify({"error": "Sistem yogunlugu nedeniyle su an yanit veremiyoruz, lutfen birazdan tekrar deneyin."}), 200
+        
+        # --- JSON TEMİZLEYİCİ ---
         raw_text = response.text.strip()
         start_idx = raw_text.find('{')
         end_idx = raw_text.rfind('}')
@@ -114,14 +135,14 @@ def recommend():
                     "title": product["title"],
                     "url": product["url"],
                     "image": product["image"],
-                    "description": r.get("aciklama", "Bu koku tam sana göre.")
+                    "description": r.get("aciklama", "Bu koku enerjinize cok yakisacak.")
                 })
         
         return jsonify({"recommendations": final_list})
 
     except Exception as e:
-        logging.error(f"Hata: {e}")
-        return jsonify({"error": f"Sistem Hatası: {str(e)}"}), 200
+        logging.error(f"Genel Hata: {e}")
+        return jsonify({"error": f"Sistem Hatasi: {str(e)}"}), 200
 
 @app.route("/")
 def home(): return "Sare API Aktif!"
