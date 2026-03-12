@@ -7,18 +7,17 @@ import re
 import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from google import genai
-from google.generativeai import types
+import google.generativeai as genai
 
 # Logging yapılandırması
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format=\'%(asctime)s - %(levelname)s - %(message)s\')
 
 app = Flask(__name__)
-CORS(app) # Tüm kaynaklardan gelen isteklere izin verir. Güvenlik için belirli origin'lerle kısıtlanabilir.
+CORS(app) # Tüm kaynaklardan gelen isteklere izin verir. Güvenlik için belirli origin\'lerle kısıtlanabilir.
 
 # --- Yapılandırma Değişkenleri ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-CSV_FILE_NAME = 'products_export_1 (2).csv'
+CSV_FILE_NAME = \'products_export_1 (2).csv\'
 PLACEHOLDER_IMAGE_URL = "https://via.placeholder.com/150?text=Sare+Perfume"
 PRODUCT_BASE_URL = "https://sareperfume.com/products/"
 
@@ -28,7 +27,7 @@ if not GEMINI_API_KEY:
     logging.error("GEMINI_API_KEY ortam değişkeni ayarlanmamış. API servisi kullanılamayacak.")
 else:
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        client = genai.GenerativeModel(api_key=GEMINI_API_KEY)
         logging.info("Gemini API istemcisi başarıyla başlatıldı.")
     except Exception as e:
         logging.error(f"Gemini API istemcisi başlatılırken hata oluştu: {e}")
@@ -41,9 +40,9 @@ def clean_html(raw_html: str) -> str:
     """HTML etiketlerini temizler ve birden fazla boşluğu tek boşluğa indirir."""
     if not raw_html: 
         return ""
-    cleanr = re.compile('<.*?>')
-    cleantext = re.sub(cleanr, ' ', raw_html)
-    return re.sub(r'\s+', ' ', cleantext).strip()
+    cleanr = re.compile(\'<.*?>\')
+    cleantext = re.sub(cleanr, \' \', raw_html)
+    return re.sub(r\'\\s+\', \' \', cleantext).strip()
 
 def load_product_data():
     """Ürün verilerini CSV dosyasından yükler ve global değişkenlere kaydeder."""
@@ -60,17 +59,17 @@ def load_product_data():
         return
 
     try:
-        with open(csv_path, mode='r', encoding='utf-8-sig') as file:
+        with open(csv_path, mode=\'r\', encoding=\'utf-8-sig\') as file:
             reader = csv.DictReader(file)
             for row in reader:
-                title = row.get('Title', '').strip()
+                title = row.get(\'Title\', \'\').strip()
                 if not title: 
                     continue # Boş (varyant) satırlarını atla
                 
-                handle = row.get('Handle', '').strip()
-                body = clean_html(row.get('Body (HTML)', ''))
-                tags = row.get('Tags', '').strip()
-                image = row.get('Image Src', '').strip()
+                handle = row.get(\'Handle\', \'\').strip()
+                body = clean_html(row.get(\'Body (HTML)\' , \'\'))
+                tags = row.get(\'Tags\', \'\').strip()
+                image = row.get(\'Image Src\', \'\').strip()
                 
                 if handle not in temp_product_db:
                     temp_product_db[handle] = {
@@ -84,7 +83,7 @@ def load_product_data():
                     line = f"KİMLİK: {handle} | İSİM: {title} | ETİKETLER: {tags} | DETAY: {body[:300]}"
                     catalog_lines.append(line)
         
-        PERFUME_CATALOG_TEXT = "\n".join(catalog_lines)
+        PERFUME_CATALOG_TEXT = "\\n".join(catalog_lines)
         PRODUCT_DB = temp_product_db
         logging.info(f"Ürün kataloğu başarıyla yüklendi. {len(PRODUCT_DB)} ürün bulundu.")
 
@@ -133,13 +132,13 @@ def recommend():
             "recommendations": [
                 {{
                     "kimlik": "Seçtiğin parfümün KİMLİK (Handle) değeri",
-                    "aciklama": "Müşteriye bu parfümü NEDEN seçtiğini doğrudan onun fotoğrafındaki/yazısındaki detaylara vurgu yaparak açıkla. ÖRNEKLER: 'Üzerinizdeki polis/asker üniformasının verdiği o otoriter ve güçlü duruşu, bu parfümün sert odunsu notalarıyla tamamlamak istedim...' veya 'Ofis ortamındaki o şık ve profesyonel tarzınızı bu temiz kokunun yansıtacağını düşündüm...' veya 'Esmer teninizde bu oryantal baharatlı kokunun çok daha kalıcı ve baştan çıkarıcı duracağından eminim...' gibi tamamen KİŞİYE ÖZEL, 2-3 cümlelik çok etkileyici ve nokta atışı bir analiz yaz."
+                    "aciklama": "Müşteriye bu parfümü NEDEN seçtiğini doğrudan onun fotoğrafındaki/yazısındaki detaylara vurgu yaparak açıkla. ÖRNEKLER: \'Üzerinizdeki polis/asker üniformasının verdiği o otoriter ve güçlü duruşu, bu parfümün sert odunsu notalarıyla tamamlamak istedim...\' veya \'Ofis ortamındaki o şık ve profesyonel tarzınızı bu temiz kokunun yansıtacağını düşündüm...\' veya \'Esmer teninizde bu oryantal baharatlı kokunun çok daha kalıcı ve baştan çıkarıcı duracağından eminim...\' gibi tamamen KİŞİYE ÖZEL, 2-3 cümlelik çok etkileyici ve nokta atışı bir analiz yaz.\"
                 }}
             ]
         }}
         """
         
-        # Katalog metnini prompt'a ekle
+        # Katalog metnini prompt\'a ekle
         prompt = prompt_template.format(PERFUME_CATALOG_TEXT=PERFUME_CATALOG_TEXT)
 
         content_parts = [prompt]
@@ -155,19 +154,18 @@ def recommend():
                 else:
                     image_data_str = image_base64
                 image_bytes = base64.b64decode(image_data_str)
-                content_parts.append(types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'))
+                content_parts.append(genai.types.Part.from_bytes(data=image_bytes, mime_type=\'image/jpeg\'))
             except Exception as e:
                 logging.error(f"Base64 resim çözümlenirken hata oluştu: {e}")
                 return jsonify({"error": "Geçersiz resim formatı."}), 400
 
         # Gemini API çağrısı
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
+        response = client.generate_content(
             contents=content_parts,
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
+            config=genai.types.GenerateContentConfig(response_mime_type="application/json"),
         )
         
-        # Gemini yanıtını temizle ve JSON'a dönüştür
+        # Gemini yanıtını temizle ve JSON\'a dönüştür
         clean_response = response.text.replace("```json", "").replace("```", "").strip()
         gemini_data = json.loads(clean_response)
         
@@ -183,7 +181,7 @@ def recommend():
                     "description": rec.get("aciklama", "").strip()
                 })
             else:
-                logging.warning(f"Gemini tarafından önerilen 'kimlik' ({handle}) katalogda bulunamadı.")
+                logging.warning(f"Gemini tarafından önerilen \'kimlik\' ({handle}) katalogda bulunamadı.")
                 
         return jsonify({"recommendations": final_results})
         
