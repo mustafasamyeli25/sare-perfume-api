@@ -71,7 +71,6 @@ def recommend():
         if not user_query and not image_base64:
             return jsonify({"error": "Lütfen bir metin yazın veya fotoğraf yükleyin."}), 400
 
-        # İŞTE BURASI YENİ YÜKSEK ZEKALI SHERLOCK HOLMES KISMI
         prompt = f"""
         Sen dünyaca ünlü, insan psikolojisinden ve görünümünden çok iyi anlayan elit bir koku uzmanısın (Master Perfumer).
         Aşağıda Sare Perfume mağazasındaki ürünlerin kataloğu var:
@@ -88,42 +87,4 @@ def recommend():
             "recommendations": [
                 {{
                     "kimlik": "Seçtiğin parfümün KİMLİK (Handle) değeri",
-                    "aciklama": "Müşteriye bu parfümü NEDEN seçtiğini doğrudan onun fotoğrafındaki/yazısındaki detaylara vurgu yaparak açıkla. ÖRNEKLER: 'Üzerinizdeki polis/asker üniformasının verdiği o otoriter ve güçlü duruşu, bu parfümün sert odunsu notalarıyla tamamlamak istedim...' veya 'Ofis ortamındaki o şık ve profesyonel tarzınızı bu temiz kokunun yansıtacağını düşündüm...' veya 'Esmer teninizde bu oryantal baharatlı kokunun çok daha kalıcı ve baştan çıkarıcı duracağından eminim...' gibi tamamen KİŞİYE ÖZEL, 2-3 cümlelik çok etkileyici ve nokta atışı bir analiz yaz."
-                }}
-            ]
-        }}
-        """
-
-        content_parts = [prompt]
-        
-        if image_base64:
-            if "," in image_base64:
-                header, image_data_str = image_base64.split(",", 1)
-            else:
-                image_data_str = image_base64
-            image_bytes = base64.b64decode(image_data_str)
-            content_parts.append(types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'))
-
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=content_parts,
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
-        )
-        
-        clean_response = response.text.replace("```json", "").replace("```", "").strip()
-        gemini_data = json.loads(clean_response)
-        
-        # Yapay zekanın seçtiği parfümlerin resimlerini ve linklerini hafızadan çekip birleştir
-        final_results = []
-        for rec in gemini_data.get("recommendations", []):
-            handle = rec.get("kimlik", "")
-            if handle in PRODUCT_DB:
-                product_info = PRODUCT_DB[handle]
-                final_results.append({
-                    "title": product_info["title"],
-                    "url": product_info["url"],
-                    "image": product_info["image"],
-                    "description": rec.get("aciklama", "")
-                })
-                
-        return
+                    "aciklama": "Müşteriye bu parfümü NEDEN seçtiğini
