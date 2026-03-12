@@ -47,7 +47,7 @@ try:
                 PRODUCT_DB[handle] = {
                     "title": title,
                     "image": image if image else "https://via.placeholder.com/150?text=Sare+Perfume",
-                    "url": f"https://sareparfum.com/products/{handle}"
+                    "url": f"https://sareperfume.com/products/{handle}"
                 }
                 
                 # Yapay zekaya sadece özet bilgi veriyoruz (Tüy gibi hafifletiyoruz)
