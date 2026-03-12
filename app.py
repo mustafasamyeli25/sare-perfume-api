@@ -4,22 +4,25 @@ import json
 import base64
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import google.generativeai as genai
+
+# YENİ KÜTÜPHANE
+from google import genai
+from google.genai import types
 
 app = Flask(__name__)
 CORS(app)
 
-# --- GEMINI API AYARI ---
+# --- YENİ GEMINI API AYARI ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
 else:
     print("UYARI: GEMINI_API_KEY bulunamadı!")
+    client = None
 
-# --- PARFÜM KATALOĞUNU HAFIZAYA AL (Vercel Uyumlu Dosya Yolu) ---
+# --- PARFÜM KATALOĞUNU HAFIZAYA AL ---
 PERFUME_CATALOG = ""
 try:
-    # Dosyanın Vercel'de tam nerede olduğunu bul
     current_dir = os.path.dirname(os.path.abspath(__file__))
     csv_path = os.path.join(current_dir, 'parfum_zenginlestirilmis.csv')
     
@@ -40,9 +43,12 @@ try:
 except Exception as e:
     PERFUME_CATALOG = f"HATA: Katalog okunamadı. Detay: {str(e)}"
 
-# --- ANA MOTOR (MULTIMODAL) ---
+# --- ANA MOTOR ---
 @app.route("/recommend", methods=["POST"])
 def recommend():
+    if not client:
+        return jsonify({"error": "Sistem Hatası: API Anahtarı eksik."}), 200
+
     try:
         data = request.get_json()
         user_query = data.get("query", "")
@@ -75,35 +81,43 @@ def recommend():
         }}
         """
 
-        content = [prompt]
+        content_parts = [prompt]
         
         if image_base64:
             if "," in image_base64:
-                header, image_data = image_base64.split(",", 1)
+                header, image_data_str = image_base64.split(",", 1)
             else:
-                image_data = image_base64
+                image_data_str = image_base64
                 
-            content.append({
-                "mime_type": "image/jpeg",
-                "data": image_data
-            })
+            # Yeni kütüphanede resimler 'bytes' formatında gönderilir
+            image_bytes = base64.b64decode(image_data_str)
+            content_parts.append(
+                types.Part.from_bytes(
+                    data=image_bytes,
+                    mime_type='image/jpeg'
+                )
+            )
 
-        model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
-        response = model.generate_content(content)
+        # Yeni kütüphane ile çağrı yap (Model adını da güncelledik)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash', # En güncel ve hızlı model!
+            contents=content_parts,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+            ),
+        )
         
-        # Gemini'nin olası markdown (```json) işaretlerini zorla temizle
         clean_response = response.text.replace("```json", "").replace("```", "").strip()
-        
         result_json = json.loads(clean_response)
+        
         return jsonify(result_json)
         
     except Exception as e:
-        # Hata olursa artık 500 dönüp gizlemeyeceğiz, hatanın adını ekrana yansıtacağız!
         return jsonify({"error": f"Sistem Hatası: {str(e)}"}), 200
 
 @app.route("/")
 def health_check():
-    return "Sare Perfume API - Aktif!"
+    return "Sare Perfume API - Yeni Nesil Motor Aktif!"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
