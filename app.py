@@ -7,13 +7,10 @@ import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# SADECE YENİ KÜTÜPHANEYİ KULLANIYORUZ
-from google import genai
-from google.genai import types
+# STABİL VE GÜVENİLİR KÜTÜPHANE
+import google.generativeai as genai
 
-# Logları açalım (Hata olursa Vercel'de görelim)
 logging.basicConfig(level=logging.INFO)
-
 app = Flask(__name__)
 CORS(app)
 
@@ -22,10 +19,12 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 CSV_NAME = 'products_export_1 (2).csv'
 STORE_URL = "https://sareperfume.com/products/"
 
-# İstemciyi başlat
-client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+# Gemini Yapılandırması
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    logging.info("Gemini API Yapılandırması Başarılı.")
 
-# --- KATALOĞU YÜKLE ---
+# --- VERİ YÜKLEME ---
 PRODUCT_DB = {}
 CATALOG_TEXT = ""
 
@@ -53,18 +52,17 @@ def load_data():
                         "image": row.get('Image Src', '') or "https://via.placeholder.com/200",
                         "url": f"{STORE_URL}{h}"
                     }
-                    tags = row.get('Tags', '')
-                    lines.append(f"KOD: {h} | ÜRÜN: {t} | ETİKETLER: {tags}")
+                    lines.append(f"KOD: {h} | ÜRÜN: {t} | ETİKETLER: {row.get('Tags', '')}")
         CATALOG_TEXT = "\n".join(lines)
         logging.info(f"Katalog Yüklendi: {len(PRODUCT_DB)} ürün.")
     except Exception as e:
-        logging.error(f"Veri yüklenirken hata: {e}")
+        logging.error(f"Veri yükleme hatası: {e}")
 
 load_data()
 
 @app.route("/recommend", methods=["POST"])
 def recommend():
-    if not client:
+    if not GEMINI_API_KEY:
         return jsonify({"error": "API Key eksik."}), 200
 
     try:
@@ -75,28 +73,30 @@ def recommend():
         if not query and not img:
             return jsonify({"error": "Lütfen bir veri girin."}), 400
 
-        # PROMPT (Süslü parantez hatası vermemesi için yeni yöntem)
-        prompt_text = (
-            "Sen uzman bir koku danışmanısın. Kataloğumuz aşağıdadır:\n"
+        # Sherlock Holmes Prompt
+        prompt = (
+            "Sen elit bir koku danışmanısın. Kataloğumuz aşağıdadır:\n"
             f"{CATALOG_TEXT}\n\n"
             "GÖREV: Müşterinin tarzını, mesleğini ve (fotoğraf varsa) ten rengini analiz et. "
-            "En uygun 3 parfümü seç. Yanıtı SADECE aşağıdaki JSON formatında ver:\n"
-            '{"recommendations": [{"kimlik": "Handle degeri", "analiz": "2 cümlelik kişiye özel yorum"}]}'
+            "En uygun 3 parfümü seç. Yanıtı SADECE bu JSON yapısında ver:\n"
+            '{"recommendations": [{"kimlik": "Handle degeri", "analiz": "2 cümlelik kişiye özel analiz"}]}'
         )
 
-        contents = [prompt_text]
-        if query: contents.append(f"Müşteri Talebi: {query}")
-        if img:
-            img_clean = img.split(",")[1] if "," in img else img
-            contents.append(types.Part.from_bytes(data=base64.b64decode(img_clean), mime_type='image/jpeg'))
-
-        # 404 HATASINI ÇÖZEN EN STABİL ÇAĞRI
-        response = client.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=contents,
-            config=types.GenerateContentConfig(response_mime_type='application/json')
-        )
+        content = [prompt]
+        if query: content.append(f"Müşteri Talebi: {query}")
         
+        if img:
+            img_data = img.split(",")[1] if "," in img else img
+            content.append({
+                "mime_type": "image/jpeg",
+                "data": base64.b64decode(img_data)
+            })
+
+        # 404 HATASINI BİTİREN STABİL ÇAĞRI
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(content)
+        
+        # Yanıtı işle
         raw_json = response.text.replace("```json", "").replace("```", "").strip()
         res_data = json.loads(raw_json)
         
@@ -115,10 +115,10 @@ def recommend():
 
     except Exception as e:
         logging.error(f"Sistem Hatası: {e}")
-        return jsonify({"error": f"Bir şeyler ters gitti: {str(e)}"}), 200
+        return jsonify({"error": f"Bir hata oluştu: {str(e)}"}), 200
 
 @app.route("/")
-def home(): return "Sare Perfume API v4.0 - Aktif!"
+def home(): return "Sare Perfume API v5.0 (Stable) - Aktif!"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
