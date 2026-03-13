@@ -453,8 +453,8 @@ def call_groq(prompt_text: str) -> str:
                     json={
                         "model": model,
                         "messages": [{"role": "user", "content": prompt_text}],
-                        "temperature": 0.85,
-                        "max_tokens": 1024,
+                        "temperature": 0.7,
+                        "max_tokens": 800,
                         "response_format": {"type": "json_object"}
                     },
                     timeout=30
@@ -463,8 +463,16 @@ def call_groq(prompt_text: str) -> str:
                     logging.info(f"✅ Groq başarılı: {model}")
                     return r.json()["choices"][0]["message"]["content"]
                 elif r.status_code == 429:
-                    logging.warning(f"Groq 429: {model}, key=...{key[-6:]}")
-                    time.sleep(0.5)
+                    # Retry-After header varsa oku, yoksa 1s bekle
+                    retry_after = float(r.headers.get("retry-after", 1))
+                    err_body = r.text.lower()
+                    if "day" in err_body or "daily" in err_body:
+                        # Günlük limit dolmuş — bu key'i atla
+                        logging.warning(f"Groq günlük limit: key=...{key[-6:]}")
+                        break
+                    wait = min(retry_after, 3)
+                    logging.warning(f"Groq 429: {model}, {wait}s bekleniyor")
+                    time.sleep(wait)
                     continue
                 else:
                     logging.warning(f"Groq {r.status_code}: {r.text[:150]}")
@@ -609,19 +617,43 @@ def recommend():
         logging.error(f"JSON parse hatası: {e} | Ham: {str(raw_json)[:200]}")
         return err("ALL_FAILED")
 
+    def fuzzy_handle(h: str) -> str:
+        """Handle tam eşleşmezse benzerini bul."""
+        if h in PRODUCT_DB:
+            return h
+        # Kısmi eşleşme — AI bazen handle'ı kısaltıyor
+        h_norm = h.lower().strip()
+        for key in PRODUCT_DB:
+            if h_norm in key or key in h_norm:
+                logging.info(f"Fuzzy handle: '{h}' → '{key}'")
+                return key
+        # Kelime bazlı eşleşme
+        h_words = set(h_norm.replace('-', ' ').split())
+        best, best_score = None, 0
+        for key in PRODUCT_DB:
+            key_words = set(key.replace('-', ' ').split())
+            score = len(h_words & key_words)
+            if score > best_score:
+                best_score = score
+                best = key
+        if best and best_score >= 2:
+            logging.info(f"Word-match handle: '{h}' → '{best}' (score={best_score})")
+            return best
+        logging.warning(f"Bilinmeyen handle: '{h}'")
+        return None
+
     results = []
     for rec in data_parsed.get("recommendations", []):
         handle = (rec.get("kimlik") or "").strip()
-        if handle and handle in PRODUCT_DB:
-            p = PRODUCT_DB[handle]
+        resolved = fuzzy_handle(handle) if handle else None
+        if resolved:
+            p = PRODUCT_DB[resolved]
             results.append({
                 "title"      : p["title"],
                 "url"        : p["url"],
                 "image"      : p["image"],
                 "description": (rec.get("aciklama") or "").strip()
             })
-        else:
-            logging.warning(f"Bilinmeyen handle: '{handle}'")
 
     if not results:
         return jsonify({"error": "Size özel öneri oluşturulamadı. Farklı bir şey dener misiniz?"}), 200
