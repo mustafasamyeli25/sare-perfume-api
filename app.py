@@ -57,8 +57,11 @@ if not API_KEYS:
 else:
     logging.info(f"{len(API_KEYS)} adet API anahtarı yüklendi.")
 
-# Model tercihi — önce hız/kota dengesi iyi olan
+# Gemini modelleri (yedek)
 MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite"]
+
+# Groq modelleri (birincil — ücretsiz, hızlı, günde 14.400 istek)
+GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it"]
 
 CSV_FILE_NAME    = "products_export_1 (2).csv"
 PLACEHOLDER_IMG  = "https://via.placeholder.com/150?text=Sare+Perfume"
