@@ -1,239 +1,523 @@
-import os, json, random, logging, time, re, base64
-from fastapi import FastAPI, Request
+"""
+Sare Perfume - AI Danışman Backend
+FastAPI + Pinecone (RAG) + Redis Cache + Groq/Gemini LLM + Gemini Vision
+Vercel deployment ready
+"""
+
+import os
+import json
+import base64
+import hashlib
+import asyncio
+import logging
+from typing import Optional
+from contextlib import asynccontextmanager
+
+import httpx
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import requests
-import google.generativeai as genai
-from pinecone import Pinecone
-from upstash_redis import Redis
+from pydantic import BaseModel
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-app = FastAPI()
+# ── Environment Variables ─────────────────────────────────────────────────────
+PINECONE_API_KEY   = os.environ["PINECONE_API_KEY"]
+PINECONE_INDEX     = os.environ.get("PINECONE_INDEX", "sare-perfume")
+PINECONE_HOST      = os.environ["PINECONE_HOST"]          # e.g. https://sare-perfume-xxxx.svc.xxx.pinecone.io
 
-# Shopify frontend'in API ile konuşabilmesi için CORS izni
+UPSTASH_REDIS_URL  = os.environ["UPSTASH_REDIS_URL"]      # https://xxx.upstash.io
+UPSTASH_REDIS_TOKEN= os.environ["UPSTASH_REDIS_TOKEN"]
+
+GEMINI_API_KEYS    = [k.strip() for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k.strip()]
+GROQ_API_KEYS      = [k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()]
+
+CACHE_TTL          = int(os.environ.get("CACHE_TTL", 3600))   # seconds
+TOP_K              = int(os.environ.get("TOP_K", 3))
+
+# ── Key Rotation State ────────────────────────────────────────────────────────
+_groq_idx   = 0
+_gemini_idx = 0
+
+def next_groq_key() -> str:
+    global _groq_idx
+    if not GROQ_API_KEYS:
+        raise ValueError("GROQ_API_KEYS boş!")
+    key = GROQ_API_KEYS[_groq_idx % len(GROQ_API_KEYS)]
+    _groq_idx += 1
+    return key
+
+def next_gemini_key() -> str:
+    global _gemini_idx
+    if not GEMINI_API_KEYS:
+        raise ValueError("GEMINI_API_KEYS boş!")
+    key = GEMINI_API_KEYS[_gemini_idx % len(GEMINI_API_KEYS)]
+    _gemini_idx += 1
+    return key
+
+# ── Lifespan ──────────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("🚀 Sare Perfume AI Danışman başlatılıyor...")
+    yield
+    logger.info("🛑 Uygulama kapatılıyor.")
+
+# ── FastAPI App ───────────────────────────────────────────────────────────────
+app = FastAPI(
+    title="Sare Perfume AI Danışman",
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],          # Shopify domain'ini buraya ekleyebilirsin
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ==========================================
-# 1. DIŞ SERVİS BAĞLANTILARI
-# ==========================================
-PINECONE_KEY = os.environ.get("PINECONE_API_KEY", "")
-REDIS_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "")
-REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+# ── Request / Response Models ─────────────────────────────────────────────────
+class QueryRequest(BaseModel):
+    query: str
+    gender: Optional[str] = None       # "erkek" | "kadın" | "unisex"
+    season: Optional[str] = None       # "yaz" | "kış" | "ilkbahar" | "sonbahar"
+    budget: Optional[str] = None       # "düşük" | "orta" | "yüksek"
+    occasion: Optional[str] = None     # "iş" | "gece" | "günlük" | "özel"
 
-# Pinecone ve Redis'i Başlat
-pc = Pinecone(api_key=PINECONE_KEY) if PINECONE_KEY else None
-index = pc.Index("sare-perfume") if pc else None
-redis = Redis(url=REDIS_URL, token=REDIS_TOKEN) if REDIS_URL and REDIS_TOKEN else None
 
-# ==========================================
-# 2. ÇOKLU API ANAHTARI YÖNETİMİ
-# ==========================================
-def get_keys(prefix):
-    """Vercel'den virgülle ayrılmış veya _1, _2 formatındaki anahtarları toplar."""
-    keys = []
-    val = os.environ.get(prefix, "").strip()
-    if val:
-        keys.extend([k.strip() for k in val.split(",") if k.strip()])
-    for i in range(1, 15):
-        k = os.environ.get(f"{prefix}_{i}", "").strip()
-        if k: keys.append(k)
-    return list(dict.fromkeys(keys))
+class Recommendation(BaseModel):
+    title: str
+    url: str
+    image: str
+    description: str
+    price: Optional[str] = None
+    score: Optional[float] = None
 
-GROQ_KEYS = get_keys("GROQ_API_KEY")
-GEMINI_KEYS = get_keys("GEMINI_API_KEY")
 
-if GEMINI_KEYS:
-    # Varsayılan olarak ilk Gemini anahtarını kütüphaneye tanımlayalım
-    genai.configure(api_key=GEMINI_KEYS[0])
+class RecommendationResponse(BaseModel):
+    recommendations: list[Recommendation]
+    message: str
+    cached: bool = False
 
-GROQ_INDEX = 0
 
-# ==========================================
-# 3. YARDIMCI YAPAY ZEKA FONKSİYONLARI
-# ==========================================
-def get_embedding(text: str):
-    """Müşterinin sorusunu Pinecone'un arayacağı 768 boyutlu vektöre çevirir."""
-    models = genai.list_models()
-    embed_model = next((m.name for m in models if 'embedContent' in m.supported_generation_methods), "models/embedding-001")
-    resp = genai.embed_content(model=embed_model, content=text, task_type="retrieval_query")
-    return resp['embedding'][:768] 
+# ══════════════════════════════════════════════════════════════════════════════
+# REDIS CACHE HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
 
-def analyze_image_with_gemini(image_b64: str) -> str:
-    """Müşterinin yüklediği fotoğrafı analiz edip, tarzını/enerjisini metne döker."""
-    img_str = image_b64.split(",", 1)[-1] if "," in image_b64 else image_b64
-    mime = "image/jpeg"
-    if image_base64.startswith("data:image/png"): mime = "image/png"
-    elif image_base64.startswith("data:image/webp"): mime = "image/webp"
-    
-    # Gemini'nin görme (vision) yetenekli modelini kullanıyoruz
-    model = genai.GenerativeModel('gemini-2.0-flash') 
-    prompt = "Bu fotoğraftaki kişinin genel tarzını, enerjisini, renk paletini ve ortam atmosferini oku. Ona en uygun parfümü seçmek için bana 1-2 cümlelik bir stil özeti çıkar."
-    
-    response = model.generate_content([
-        prompt, 
-        {"mime_type": mime, "data": img_str}
-    ])
-    return response.text
+def make_cache_key(data: dict) -> str:
+    raw = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    return "sare:" + hashlib.sha256(raw.encode()).hexdigest()[:24]
 
-def call_groq(prompt: str):
-    """Birincil Yapay Zeka (Groq LLaMA 3) - Çoklu Anahtar ile."""
-    global GROQ_INDEX
-    if not GROQ_KEYS: raise Exception("Groq anahtarı yok.")
-    
-    n = len(GROQ_KEYS)
-    keys_to_try = [GROQ_KEYS[(GROQ_INDEX + i) % n] for i in range(n)]
-    GROQ_INDEX = (GROQ_INDEX + 1) % n
-
-    for key in keys_to_try:
-        try:
-            r = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "response_format": {"type": "json_object"},
-                    "temperature": 0.7
-                },
-                timeout=15
+async def redis_get(key: str) -> Optional[str]:
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            r = await client.get(
+                f"{UPSTASH_REDIS_URL}/get/{key}",
+                headers={"Authorization": f"Bearer {UPSTASH_REDIS_TOKEN}"},
             )
-            if r.status_code == 200:
-                return r.json()["choices"][0]["message"]["content"]
-            elif r.status_code == 429: 
-                time.sleep(1)
-                continue
-        except: continue
-    raise Exception("Tüm Groq anahtarları başarısız oldu.")
-
-def call_gemini_fallback(prompt: str):
-    """Yedek Yapay Zeka (Gemini) - Groq çökerse devreye girer."""
-    keys_to_try = GEMINI_KEYS.copy()
-    random.shuffle(keys_to_try) 
-    
-    for key in keys_to_try:
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}"
-            r = requests.post(url, json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json"} 
-            }, timeout=15)
-            if r.status_code == 200:
-                return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        except: continue
-    raise Exception("Gemini de başarısız oldu.")
-
-# ==========================================
-# 4. ANA API ENDPOINT (Müşteri buraya istek atar)
-# ==========================================
-@app.post("/recommend")
-async def recommend(request: Request):
-    try:
-        data = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Geçersiz istek."}, status_code=400)
-
-    user_query = data.get("query", "").strip()
-    image_base64 = data.get("image")
-
-    if not user_query and not image_base64:
-        return JSONResponse({"error": "Lütfen bir koku tarzı yazın veya fotoğraf yükleyin."}, status_code=400)
-
-    image_context = ""
-    # EĞER FOTOĞRAF VARSA ÖNCE ONU ANALİZ ET
-    if image_base64:
-        try:
-            image_context = analyze_image_with_gemini(image_base64)
-            logging.info(f"📸 Resim analizi tamamlandı: {image_context}")
-        except Exception as e:
-            logging.warning(f"Resim analizi başarısız: {e}")
-            return JSONResponse({"error": "Fotoğraf analiz edilemedi, lütfen farklı bir fotoğraf deneyin."}, status_code=400)
-
-    # Arama metnini birleştir
-    combined_search_text = f"{user_query} {image_context}".strip()
-
-    # ADIM 1: ÖN BELLEK (REDİS)
-    cache_key = f"sare_query:{combined_search_text.lower()}"
-    if redis:
-        try:
-            cached_result = redis.get(cache_key)
-            if cached_result:
-                logging.info("⚡ Redis'ten önbellek yanıtı döndü.")
-                res_str = cached_result.decode("utf-8") if isinstance(cached_result, bytes) else cached_result
-                return JSONResponse(json.loads(res_str))
-        except Exception as e:
-            logging.warning(f"Redis hatası: {e}")
-
-    # ADIM 2: SEMANTİK ARAMA (PINECONE)
-    try:
-        query_vector = get_embedding(combined_search_text)
-        search_results = index.query(vector=query_vector, top_k=3, include_metadata=True)
+            data = r.json()
+            return data.get("result")
     except Exception as e:
-        logging.error(f"Pinecone Arama Hatası: {e}")
-        return JSONResponse({"error": "Veritabanına ulaşılamadı. Lütfen tekrar deneyin."}, status_code=500)
+        logger.warning(f"Redis GET hatası: {e}")
+        return None
 
-    context_text = ""
-    products_db = []
-    
-    for match in search_results.get("matches", []):
-        md = match.get("metadata", {})
-        handle = md.get("handle", "bilinmeyen")
-        title = md.get("title", "Parfüm")
-        desc = md.get("text", "")
-        
-        context_text += f"- Ürün ID: {handle} | İsim: {title} | Özellikler: {desc}\n"
-        products_db.append({
-            "handle": handle,
-            "title": title,
-            "image": md.get("image", "https://via.placeholder.com/150?text=Sare+Perfume"),
-            "url": f"https://sareperfume.com/products/{handle}"
+async def redis_set(key: str, value: str, ttl: int = CACHE_TTL) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            await client.post(
+                f"{UPSTASH_REDIS_URL}/set/{key}",
+                headers={
+                    "Authorization": f"Bearer {UPSTASH_REDIS_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+                json={"value": value, "ex": ttl},
+            )
+    except Exception as e:
+        logger.warning(f"Redis SET hatası: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GEMINI EMBEDDING
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def embed_text(text: str) -> list[float]:
+    """Gemini text-embedding-004 ile 768 boyutlu vektör üret."""
+    api_key = next_gemini_key()
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"text-embedding-004:embedContent?key={api_key}"
+    )
+    payload = {
+        "model": "models/text-embedding-004",
+        "content": {"parts": [{"text": text}]},
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(url, json=payload)
+        r.raise_for_status()
+        return r.json()["embedding"]["values"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PINECONE QUERY
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def pinecone_query(vector: list[float], top_k: int = TOP_K, filter_meta: dict = None) -> list[dict]:
+    """Pinecone'da en yakın parfümleri bul."""
+    payload: dict = {
+        "vector": vector,
+        "topK": top_k,
+        "includeMetadata": True,
+    }
+    if filter_meta:
+        payload["filter"] = filter_meta
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(
+            f"{PINECONE_HOST}/query",
+            headers={
+                "Api-Key": PINECONE_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        r.raise_for_status()
+        matches = r.json().get("matches", [])
+
+    results = []
+    for m in matches:
+        meta = m.get("metadata", {})
+        results.append({
+            "id": m.get("id"),
+            "score": round(m.get("score", 0), 4),
+            "title": meta.get("title", ""),
+            "url": meta.get("url", ""),
+            "image": meta.get("image", ""),
+            "price": meta.get("price", ""),
+            "notes": meta.get("notes", ""),
+            "season": meta.get("season", ""),
+            "gender": meta.get("gender", ""),
+            "description": meta.get("description", ""),
         })
+    return results
 
-    # ADIM 3: YAPAY ZEKAYA (LLM) GİDECEK PROMPT
-    prompt = f"""
-    Sen Sare Parfüm'ün uzman danışmanısın.
-    
-    Müşterinin Mesajı: "{user_query}"
-    Müşterinin Fotoğraf Analizi (Eğer varsa): "{image_context}"
-    
-    Veritabanımızdan müşterinin aradığına en uygun şu 3 ürünü bulduk:
-    {context_text}
-    
-    GÖREV: Bu 3 parfümü müşteriye zarif, edebi ve kokuyu hissettirecek bir dille anlat.
-    - SADECE JSON formatında çıktı ver. Başka hiçbir şey yazma.
-    - Orijinal markalardan bahsederken "ilham alan" gibi şık tabirler kullan.
-    
-    FORMAT ŞÖYLE OLMALI:
-    {{
-      "recommendations": [
-        {{
-          "kimlik": "urun-id-buraya",
-          "aciklama": "Parfümün 2-3 cümlelik şık ve cezbedici anlatımı."
-        }}
-      ]
-    }}
-    """
 
-    # ADIM 4: YANIT ÜRET VE KULLANICIYA GÖNDER
-    raw_json = None
+# ══════════════════════════════════════════════════════════════════════════════
+# LLM: GROQ (Ana) + GEMINI FLASH (Fallback)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_system_prompt() -> str:
+    return """Sen Sare Perfume'ün uzman parfüm danışmanısın. 
+Müşterilere sıcak, zarif ve kişisel bir deneyim sunarsın.
+Görevin: Sana verilen ürün listesinden müşteriye en uygun parfümleri seçmek ve 
+her biri için büyüleyici, duygusal bir pazarlama açıklaması yazmak.
+
+KURALLAR:
+- Mutlaka JSON formatında yanıt ver (başka hiçbir şey yazma)
+- Her parfüm için 2-3 cümlelik etkileyici Türkçe açıklama yaz
+- Müşterinin tercihlerini (mevsim, cinsiyet, bütçe, ortam) mutlaka göz önünde bulundur
+- Samimi ve lüks bir dil kullan
+
+YANIT FORMATI (kesinlikle bu JSON):
+{
+  "message": "Müşteriye özel samimi bir karşılama mesajı (1-2 cümle)",
+  "recommendations": [
+    {
+      "title": "Parfüm Adı",
+      "url": "ürün linki",
+      "image": "resim url",
+      "price": "fiyat",
+      "description": "2-3 cümle büyüleyici açıklama"
+    }
+  ]
+}"""
+
+def build_user_prompt(query: str, products: list[dict], filters: dict) -> str:
+    filter_text = ""
+    if filters.get("gender"):
+        filter_text += f"Cinsiyet tercihi: {filters['gender']}\n"
+    if filters.get("season"):
+        filter_text += f"Mevsim: {filters['season']}\n"
+    if filters.get("budget"):
+        filter_text += f"Bütçe: {filters['budget']}\n"
+    if filters.get("occasion"):
+        filter_text += f"Kullanım ortamı: {filters['occasion']}\n"
+
+    products_text = ""
+    for i, p in enumerate(products, 1):
+        products_text += f"""
+Ürün {i}:
+- İsim: {p['title']}
+- URL: {p['url']}
+- Resim: {p['image']}
+- Fiyat: {p.get('price', 'Belirtilmemiş')}
+- Notalar: {p.get('notes', '')}
+- Mevsim: {p.get('season', '')}
+- Cinsiyet: {p.get('gender', '')}
+- Açıklama: {p.get('description', '')}
+"""
+
+    return f"""Müşteri isteği: "{query}"
+
+{filter_text}
+Aşağıdaki parfümler arasından en uygun olanları öner:
+{products_text}
+
+Lütfen JSON formatında yanıt ver."""
+
+
+async def call_groq(system: str, user: str) -> dict:
+    """Groq Llama-3.3-70b ile LLM çağrısı."""
+    api_key = next_groq_key()
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0.7,
+        "max_tokens": 1500,
+        "response_format": {"type": "json_object"},
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        r.raise_for_status()
+        content = r.json()["choices"][0]["message"]["content"]
+        return json.loads(content)
+
+
+async def call_gemini_flash(system: str, user: str) -> dict:
+    """Gemini 2.0 Flash fallback."""
+    api_key = next_gemini_key()
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.0-flash:generateContent?key={api_key}"
+    )
+    payload = {
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": [{"parts": [{"text": user}]}],
+        "generationConfig": {
+            "temperature": 0.7,
+            "maxOutputTokens": 1500,
+            "responseMimeType": "application/json",
+        },
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, json=payload)
+        r.raise_for_status()
+        text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(text)
+
+
+async def call_llm(system: str, user: str) -> dict:
+    """Groq dene, başarısız olursa Gemini Flash'a geç."""
     try:
-        raw_json = call_groq(prompt)
-        logging.info("🚀 Groq ile başarıyla yanıt üretildi.")
+        logger.info("🤖 Groq çağrılıyor...")
+        return await call_groq(system, user)
     except Exception as e:
-        logging.warning(f"Groq çöktü, Gemini'ye geçiliyor: {e}")
-        try:
-            raw_json = call_gemini_fallback(prompt)
-            logging.info("⭐ Gemini ile başarıyla yedek yanıt üretildi.")
-        except Exception as err:
-            logging.error(f"Her iki API de çöktü: {err}")
-            return JSONResponse({"error": "Danışmanlarımız çok meşgul. Lütfen birazdan tekrar deneyin."}, status_code=503)
+        logger.warning(f"Groq hatası ({e}), Gemini Flash'a geçiliyor...")
+        return await call_gemini_flash(system, user)
 
-    try:
-        # JSON temizleme ve parse etme
-        cleaned_json = re.sub(r'^
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GEMINI VISION - Stil Analizi
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def analyze_style_with_vision(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+    """Müşterinin kıyafet/stil fotoğrafını analiz et, parfüm önerisi için bağlam üret."""
+    api_key = next_gemini_key()
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.0-flash:generateContent?key={api_key}"
+    )
+    image_b64 = base64.b64encode(image_bytes).decode()
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": image_b64,
+                        }
+                    },
+                    {
+                        "text": (
+                            "Bu fotoğraftaki kişinin stilini, ruh halini ve genel estetik duruşunu analiz et. "
+                            "Renk paleti, giyim tarzı ve atmosferi göz önünde bulundurarak bu kişiye uygun parfüm "
+                            "notalarını ve özelliklerini Türkçe olarak kısa ve öz bir şekilde belirt. "
+                            "Sadece parfüm arama sorgusuna dönüştürülebilecek bir metin yaz."
+                        )
+                    },
+                ]
+            }
+        ],
+        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 300},
+    }
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(url, json=payload)
+        r.raise_for_status()
+        return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CORE RAG PIPELINE
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def rag_pipeline(query: str, filters: dict) -> dict:
+    """
+    1. Redis kontrol
+    2. Embedding
+    3. Pinecone sorgu
+    4. LLM (Groq / Gemini fallback)
+    5. Redis'e kaydet
+    """
+    cache_key = make_cache_key({"q": query, **filters})
+
+    # 1. Cache kontrolü
+    cached = await redis_get(cache_key)
+    if cached:
+        logger.info(f"✅ Cache hit: {cache_key}")
+        result = json.loads(cached)
+        result["cached"] = True
+        return result
+
+    # 2. Embedding
+    logger.info("🔢 Embedding oluşturuluyor...")
+    vector = await embed_text(query)
+
+    # 3. Pinecone – opsiyonel metadata filtresi
+    pinecone_filter = {}
+    if filters.get("gender"):
+        pinecone_filter["gender"] = {"$in": [filters["gender"], "unisex"]}
+    if filters.get("season"):
+        pinecone_filter["season"] = {"$in": [filters["season"], "tüm mevsimler"]}
+
+    logger.info("📌 Pinecone sorgulanıyor...")
+    products = await pinecone_query(vector, top_k=TOP_K, filter_meta=pinecone_filter or None)
+
+    if not products:
+        raise HTTPException(status_code=404, detail="Uygun parfüm bulunamadı.")
+
+    # 4. LLM
+    logger.info("✨ LLM çağrılıyor...")
+    system_prompt = build_system_prompt()
+    user_prompt   = build_user_prompt(query, products, filters)
+    llm_response  = await call_llm(system_prompt, user_prompt)
+
+    # LLM çıktısını normalize et
+    recommendations = []
+    for item in llm_response.get("recommendations", []):
+        recommendations.append(Recommendation(
+            title=item.get("title", ""),
+            url=item.get("url", ""),
+            image=item.get("image", ""),
+            description=item.get("description", ""),
+            price=item.get("price"),
+        ).model_dump())
+
+    result = {
+        "recommendations": recommendations,
+        "message": llm_response.get("message", "Size özel parfüm önerilerim hazır!"),
+        "cached": False,
+    }
+
+    # 5. Cache'e kaydet
+    await redis_set(cache_key, json.dumps(result, ensure_ascii=False))
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "Sare Perfume AI Danışman v2.0"}
+
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+
+@app.post("/recommend", response_model=RecommendationResponse)
+async def recommend(req: QueryRequest):
+    """
+    Ana öneri endpoint'i.
+    Shopify frontend'den fetch ile çağrılır.
+    """
+    if not req.query or len(req.query.strip()) < 2:
+        raise HTTPException(status_code=400, detail="Lütfen geçerli bir sorgu girin.")
+
+    filters = {
+        "gender": req.gender,
+        "season": req.season,
+        "budget": req.budget,
+        "occasion": req.occasion,
+    }
+    # None değerleri temizle
+    filters = {k: v for k, v in filters.items() if v}
+
+    result = await rag_pipeline(req.query, filters)
+    return JSONResponse(content=result)
+
+
+@app.post("/recommend-by-image", response_model=RecommendationResponse)
+async def recommend_by_image(
+    image: UploadFile = File(...),
+    gender: Optional[str] = Form(None),
+    season: Optional[str] = Form(None),
+    budget: Optional[str] = Form(None),
+    occasion: Optional[str] = Form(None),
+):
+    """
+    Müşteri fotoğraf yükler -> Gemini Vision stil analizi -> RAG pipeline.
+    """
+    allowed_types = {"image/jpeg", "image/png", "image/webp"}
+    if image.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Sadece JPEG, PNG veya WebP yükleyebilirsiniz.")
+
+    image_bytes = await image.read()
+    if len(image_bytes) > 5 * 1024 * 1024:  # 5 MB limit
+        raise HTTPException(status_code=400, detail="Resim boyutu 5 MB'ı geçemez.")
+
+    logger.info("🖼️ Görsel analiz ediliyor...")
+    style_query = await analyze_style_with_vision(image_bytes, image.content_type)
+    logger.info(f"Stil analizi: {style_query}")
+
+    filters = {k: v for k, v in {
+        "gender": gender, "season": season,
+        "budget": budget, "occasion": occasion,
+    }.items() if v}
+
+    result = await rag_pipeline(style_query, filters)
+    result["style_analysis"] = style_query   # Frontend'e bonus bilgi
+    return JSONResponse(content=result)
+
+
+@app.post("/search")
+async def search(req: QueryRequest):
+    """
+    Doğrudan Pinecone vektör araması (LLM olmadan, hız gerektiren durumlar için).
+    """
+    vector   = await embed_text(req.query)
+    products = await pinecone_query(vector, top_k=6)
+    return JSONResponse(content={"results": products})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOCAL DEV
+# ══════════════════════════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
