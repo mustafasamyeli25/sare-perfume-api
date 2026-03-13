@@ -48,6 +48,7 @@ PRODUCT_BASE_URL = "https://sareperfume.com/products/"
 # ─────────────────────────────────────────────────────────
 PERFUME_CATALOG_TEXT = ""
 PRODUCT_DB = {}
+PERFUME_ALL_LINES = []  # tüm ürün satırları — akıllı filtreleme için
 
 def clean_html(raw):
     if not raw: return ""
@@ -61,6 +62,7 @@ def load_products():
         PERFUME_CATALOG_TEXT = "HATA: Katalog bulunamadı."
         return
     lines, db = [], {}
+    # Tüm ürünleri DB'ye yükle (resim/url için) ama AI'ya max 100 ürün gönder
     try:
         with open(csv_path, encoding='utf-8-sig') as f:
             for row in csv.DictReader(f):
@@ -73,12 +75,12 @@ def load_products():
                         "image": row.get('Image Src', '').strip() or PLACEHOLDER_IMG,
                         "url"  : f"{PRODUCT_BASE_URL}{handle}"
                     }
-                    lines.append(
-                        f"ID:{handle}|İSİM:{title}|TAGS:{row.get('Tags','').strip()}"
-                        f"|DETAY:{clean_html(row.get('Body (HTML)',''))[:300]}"
-                    )
-        PERFUME_CATALOG_TEXT = "\n".join(lines)
+                    tags = row.get('Tags','').strip()
+                    lines.append(f"{handle}|{title}|{tags}")
         PRODUCT_DB = db
+        PERFUME_ALL_LINES[:] = lines  # tüm ürün satırlarını sakla
+        # Varsayılan katalog: ilk 100 ürün
+        PERFUME_CATALOG_TEXT = "\n".join(lines[:100])
         logging.info(f"{len(db)} ürün yüklendi.")
     except Exception as e:
         logging.error(f"CSV yükleme hatası: {e}")
@@ -86,10 +88,59 @@ def load_products():
 
 load_products()
 
+
+# ─────────────────────────────────────────────────────────
+# AKILLI KATALOG FİLTRELEME
+# Sorguya göre ilgili ürünleri filtreler, token tasarrufu sağlar
+# ─────────────────────────────────────────────────────────
+KOKU_KEYWORDS = {
+    "odunsu"  : ["woody", "wood", "oud", "santal", "cedar", "patchouli", "odunsu"],
+    "çiçeksi" : ["floral", "rose", "jasmine", "çiçek", "lavender", "violet", "flower"],
+    "meyveli" : ["fruity", "fruit", "berry", "citrus", "meyve", "apple", "peach"],
+    "baharatlı": ["spicy", "spice", "baharat", "pepper", "cinnamon", "cardamom"],
+    "oryantal" : ["oriental", "amber", "musk", "oryantal", "vanilla", "resin"],
+    "taze"    : ["fresh", "aqua", "marine", "taze", "green", "mint", "ocean"],
+    "erkek"   : ["men", "homme", "erkek", "masculine"],
+    "kadın"   : ["women", "femme", "kadın", "feminine", "pour femme"],
+    "unisex"  : ["unisex", "nötr"],
+}
+
+def smart_catalog(query: str, max_items: int = 80) -> str:
+    """Sorguya göre filtrelenmiş katalog döndürür. Eşleşme yoksa ilk max_items ürünü verir."""
+    if not query or not PERFUME_ALL_LINES:
+        return "\n".join(PERFUME_ALL_LINES[:max_items]) if PERFUME_ALL_LINES else PERFUME_CATALOG_TEXT
+
+    query_lower = query.lower()
+    matched_keys = []
+
+    # Hangi kategoriler eşleşiyor?
+    for category, words in KOKU_KEYWORDS.items():
+        if any(w in query_lower for w in words):
+            matched_keys.extend(words)
+
+    if not matched_keys:
+        # Eşleşme yok — sorgu kelimelerini doğrudan ürün satırlarında ara
+        query_words = [w for w in query_lower.split() if len(w) > 2]
+        matched = [l for l in PERFUME_ALL_LINES
+                   if any(w in l.lower() for w in query_words)]
+        # Eşleşen + rastgele karışım, toplam max_items
+        unmatched = [l for l in PERFUME_ALL_LINES if l not in matched]
+        combined = matched[:max_items//2] + unmatched[:max_items - min(len(matched), max_items//2)]
+        return "\n".join(combined[:max_items])
+
+    # Eşleşen kategorideki ürünleri öne al
+    matched_lines = [l for l in PERFUME_ALL_LINES
+                     if any(k in l.lower() for k in matched_keys)]
+    other_lines   = [l for l in PERFUME_ALL_LINES if l not in matched_lines]
+    combined = matched_lines[:max_items] + other_lines[:max(0, max_items - len(matched_lines))]
+    
+    logging.info(f"Katalog filtresi: {len(matched_lines)} eşleşen + {len(combined)-len(matched_lines)} ek ürün")
+    return "\n".join(combined[:max_items])
+
 # ─────────────────────────────────────────────────────────
 # PROMPT
 # ─────────────────────────────────────────────────────────
-def build_prompt(has_image):
+def build_prompt(has_image, user_query=""):
     img_note = ""
     if has_image:
         img_note = (
@@ -101,7 +152,7 @@ def build_prompt(has_image):
         "Sen dünyanın en iyi parfüm butiklerinden birinde çalışan, insan ruhunu ve kokuları "
         "derinlemesine bilen bir uzmanısın. Müşterilere reklam değil, gerçek bir dost gibi "
         "konuşursun — sıcak, özgün, biraz gizemli. Klişe cümleler hiç kullanmazsın.\n\n"
-        "KATALOG:\n" + PERFUME_CATALOG_TEXT + "\n\n" + img_note +
+        "KATALOG (format: handle|isim|etiketler):\n" + smart_catalog(user_query) + "\n\n" + img_note +
         "GÖREV: Müşterinin mesajı veya fotoğrafından yola çıkarak katalogdan en uygun 3 parfümü seç. "
         "Her biri için 2-3 cümlelik, KİŞİYE ÖZEL, etkileyici bir açıklama yaz. "
         "Onun hakkında fark ettiğin özgün bir detaydan başla.\n\n"
@@ -218,7 +269,7 @@ def recommend():
         return jsonify({"error": "Lütfen bir şeyler yazın veya fotoğraf yükleyin."}), 400
 
     has_image = bool(image_base64)
-    parts = [{"text": build_prompt(has_image)}]
+    parts = [{"text": build_prompt(has_image, user_query)}]
 
     if user_query:
         parts.append({"text": f"Müşteri mesajı: {user_query}"})
