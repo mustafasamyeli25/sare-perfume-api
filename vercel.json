@@ -1,7 +1,15 @@
-PINECONE_API_KEY
-PINECONE_HOST        # https://sare-perfume-xxxx.svc.xxx.pinecone.io
-PINECONE_INDEX       # sare-perfume
-UPSTASH_REDIS_URL
-UPSTASH_REDIS_TOKEN
-GEMINI_API_KEYS      # virgülle ayrılmış: key1,key2,key3
-GROQ_API_KEYS        # virgülle ayrılmış: key1,key2
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "app.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "app.py"
+    }
+  ]
+}
