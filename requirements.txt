@@ -1,6 +1,5 @@
-fastapi
-uvicorn
-google-generativeai
-pinecone
-upstash-redis
-requests
+fastapi==0.115.6
+uvicorn==0.32.1
+httpx==0.28.1
+pydantic==2.10.4
+python-multipart==0.0.20
