@@ -229,56 +229,56 @@ Zenginleştirilmiş sorgu:"""
 # GEMINI EMBEDDING
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Pinecone indeksi 768 boyutlu — hangi model kullanılırsa olsun [:768] slice yapılır
+# Pinecone indeksi 768 boyutlu — veriler models/embedding-001 ile yüklendi
 PINECONE_DIM = 768
-
-# Gemini embedding modelleri — önce birini dene, 404 gelirse sıradakine geç
-EMBEDDING_MODELS = [
-    "models/text-embedding-004",
-    "models/gemini-embedding-exp-03-07",
-    "models/embedding-001",
-]
+# Veri yüklerken task_type="retrieval_document" kullanıldı
+# Sorgularda task_type="retrieval_query" kullanılmalı (aynı model, farklı task)
+EMBEDDING_MODEL = "models/embedding-001"
 
 async def embed_text(text: str) -> list[float]:
     """
-    Gemini embedding — her modeli her key ile dene.
-    Sonucu her zaman [:768] ile Pinecone boyutuna indir.
+    Gemini embedding — models/embedding-001, task_type=retrieval_query
+    Veri yüklemede kullanılan modelin tam karşılığı.
+    5 key sırayla denenir, 429 gelince sonrakine geçilir.
+    Sonuç [:768] ile Pinecone boyutuna indirilir.
     """
     last_err = None
-    for model_path in EMBEDDING_MODELS:
-        for _ in range(len(GEMINI_API_KEYS) or 1):
-            api_key = next_gemini_key()
-            url = (
-                "https://generativelanguage.googleapis.com/v1beta"
-                f"/{model_path}:embedContent?key={api_key}"
-            )
-            payload = {
-                "model": model_path,
-                "content": {"parts": [{"text": text}]},
-            }
-            try:
-                async with httpx.AsyncClient(timeout=15) as client:
-                    r = await client.post(url, json=payload)
-                    if r.status_code == 404:
-                        logger.warning(f"Model bulunamadı: {model_path}, sonraki deneniyor.")
-                        break  # Bu modeli bırak, sıradakine geç
-                    if r.status_code == 429:
-                        last_err = f"{model_path} 429 rate limit"
-                        continue  # Sonraki key
-                    r.raise_for_status()
-                    values = r.json()["embedding"]["values"]
-                    # Pinecone 768 dim — fazla boyutları at, eksikse hata ver
-                    if len(values) < PINECONE_DIM:
-                        last_err = f"{model_path} sadece {len(values)} dim döndürdü, {PINECONE_DIM} gerekli"
-                        logger.warning(last_err)
-                        break
-                    sliced = values[:PINECONE_DIM]
-                    logger.info(f"✅ Embedding: {model_path} → {len(values)} dim → {PINECONE_DIM} dim slice")
-                    return sliced
-            except Exception as e:
-                last_err = str(e)
-                continue
-    raise HTTPException(status_code=503, detail=f"Tüm embedding modelleri başarısız: {last_err}")
+    for _ in range(len(GEMINI_API_KEYS) or 1):
+        api_key = next_gemini_key()
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta"
+            f"/{EMBEDDING_MODEL}:embedContent?key={api_key}"
+        )
+        payload = {
+            "model": EMBEDDING_MODEL,
+            "content": {"parts": [{"text": text}]},
+            "taskType": "RETRIEVAL_QUERY",  # Veri yüklemede RETRIEVAL_DOCUMENT kullanıldı
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(url, json=payload)
+                if r.status_code == 429:
+                    last_err = "429 rate limit"
+                    logger.warning(f"Gemini embedding 429, sonraki key deneniyor...")
+                    continue
+                if r.status_code == 404:
+                    last_err = f"404 — {EMBEDDING_MODEL} bu key ile erişilemiyor"
+                    logger.error(last_err)
+                    logger.error(f"Yanıt: {r.text[:300]}")
+                    continue  # Başka key dene
+                r.raise_for_status()
+                values = r.json()["embedding"]["values"]
+                sliced = values[:PINECONE_DIM]
+                logger.info(f"✅ Embedding başarılı: {len(values)} dim → {PINECONE_DIM} dim slice")
+                return sliced
+        except Exception as e:
+            last_err = str(e)
+            logger.error(f"Embedding hatası: {e}")
+            continue
+    raise HTTPException(
+        status_code=503,
+        detail=f"Embedding servisi yanıt vermedi. Son hata: {last_err}"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
