@@ -1,149 +1,268 @@
 import os
 import csv
 import json
+import base64
 import re
 import logging
-import requests
+import time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from google import genai
+from google.genai import types
 
-logging.basicConfig(level=logging.INFO)
+# ─────────────────────────────────────────────
+# LOGGING
+# ─────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+
 app = Flask(__name__)
 CORS(app)
 
-# --- AYARLAR ---
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-CSV_NAME = 'products_export_1 (2).csv'
-STORE_URL = "https://sareperfume.com/products/"
+# ─────────────────────────────────────────────
+# YAPILANDIRMA
+# ─────────────────────────────────────────────
+GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY")
+CSV_FILE_NAME    = "products_export_1 (2).csv"
+PLACEHOLDER_IMG  = "https://via.placeholder.com/150?text=Sare+Perfume"
+PRODUCT_BASE_URL = "https://sareperfume.com/products/"
+MODEL_NAME       = "gemini-2.0-flash"   # gemini-2.5-flash / gemini-1.5-flash da kullanılabilir
 
-PRODUCT_DB = {}
-CATALOG_TEXT = ""
+# ─────────────────────────────────────────────
+# GEMINİ İSTEMCİSİ
+# ─────────────────────────────────────────────
+client = None
+if not GEMINI_API_KEY:
+    logging.error("GEMINI_API_KEY ortam değişkeni eksik.")
+else:
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        logging.info("Gemini istemcisi başlatıldı.")
+    except Exception as exc:
+        logging.error(f"Gemini başlatma hatası: {exc}")
 
-def clean_html(raw):
-    if not raw: return ""
-    return re.sub(r'<.*?>', ' ', raw).replace('\n', ' ').strip()
+# ─────────────────────────────────────────────
+# ÜRÜN VERİTABANI — uygulama başında bir kez yüklenir
+# ─────────────────────────────────────────────
+PERFUME_CATALOG_TEXT = ""
+PRODUCT_DB: dict = {}
 
-def load_data():
-    global PRODUCT_DB, CATALOG_TEXT
-    path = os.path.join(os.path.dirname(__file__), CSV_NAME)
-    
-    if not os.path.exists(path):
-        logging.error(f"Hata: {CSV_NAME} dosyası bulunamadı!")
+
+def clean_html(raw: str) -> str:
+    if not raw:
+        return ""
+    clean = re.sub(r"<.*?>", " ", raw)
+    return re.sub(r"\s+", " ", clean).strip()
+
+
+def load_product_data() -> None:
+    global PERFUME_CATALOG_TEXT, PRODUCT_DB
+
+    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), CSV_FILE_NAME)
+
+    if not os.path.exists(csv_path):
+        logging.error(f"CSV bulunamadı: {csv_path}")
+        PERFUME_CATALOG_TEXT = "HATA: Katalog dosyası bulunamadı."
         return
 
-    lines = []
+    catalog_lines = []
+    temp_db = {}
+
     try:
-        # utf-8-sig kullanarak BOM karakterlerini temizliyoruz
-        with open(path, mode='r', encoding='utf-8-sig') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                h = row.get('Handle', '').strip()
-                t = row.get('Title', '').strip()
-                if h and t:
-                    PRODUCT_DB[h] = {
-                        "title": t,
-                        "image": row.get('Image Src', '') or "https://via.placeholder.com/200",
-                        "url": f"{STORE_URL}{h}"
+        with open(csv_path, mode="r", encoding="utf-8-sig") as fh:
+            for row in csv.DictReader(fh):
+                title = row.get("Title", "").strip()
+                if not title:
+                    continue
+
+                handle = row.get("Handle", "").strip()
+                body   = clean_html(row.get("Body (HTML)", ""))
+                tags   = row.get("Tags", "").strip()
+                image  = row.get("Image Src", "").strip()
+
+                if handle not in temp_db:
+                    temp_db[handle] = {
+                        "title": title,
+                        "image": image or PLACEHOLDER_IMG,
+                        "url"  : f"{PRODUCT_BASE_URL}{handle}",
                     }
-                    desc = clean_html(row.get('Body (HTML)', ''))
-                    # Gemini'nin daha iyi anlaması için yapılandırılmış metin
-                    lines.append(self_text := f"KİMLİK: {h} | AD: {t} | ÖZET: {desc[:100]}")
-        
-        CATALOG_TEXT = "\n".join(lines)
-        logging.info(f"{len(PRODUCT_DB)} ürün başarıyla yüklendi.")
-    except Exception as e:
-        logging.error(f"Katalog yükleme hatası: {e}")
+                    catalog_lines.append(
+                        f"KİMLİK: {handle} | İSİM: {title} | ETİKETLER: {tags} | DETAY: {body[:350]}"
+                    )
 
-load_data()
+        PERFUME_CATALOG_TEXT = "\n".join(catalog_lines)
+        PRODUCT_DB = temp_db
+        logging.info(f"Katalog yüklendi — {len(PRODUCT_DB)} ürün.")
 
+    except Exception as exc:
+        logging.error(f"Katalog yükleme hatası: {exc}")
+        PERFUME_CATALOG_TEXT = f"HATA: Katalog yüklenemedi. {exc}"
+
+
+load_product_data()
+
+
+# ─────────────────────────────────────────────
+# YARDIMCI: PROMPT
+# ─────────────────────────────────────────────
+def build_prompt(user_query: str, has_image: bool) -> str:
+    image_instruction = ""
+    if has_image:
+        image_instruction = """
+GÖRÜNTÜ ANALİZİ REHBERİ:
+Fotoğrafa bir sanatçı gözüyle bak — meslek veya üniforma etiketlerine takılma.
+Bunun yerine şunları hisset:
+  • Genel enerji ve atmosfer: Sakin mi, karizmatik mi, serbest ruhlu mu?
+  • Renk paleti ve giyim tarzı hangi duyguyu çağrıştırıyor?
+  • Klasik, bohem, minimalist, entelektüel, sportif?
+  • Deri tonu: Bazı koku aileleri belirli tenlerle çok daha derin açılır.
+  • Ortam enerjisi: Ev sıcaklığı mı, şehir dinamizmi mi, doğa sessizliği mi?
+Kişinin RUH HALİNİ ve İÇ DÜNYASINI oku.
+"""
+
+    return (
+        "Sen dünyanın en saygın parfüm butiklerinden birinde yıllarca çalışmış, "
+        "koku ve insan doğasını derinden bilen bir uzmanısın.\n"
+        "Müşterilere hiçbir zaman reklam gibi konuşmazsın; "
+        "aksine onları gerçekten anlayan, sıcak ve biraz gizemli bir dost gibi konuşursun.\n"
+        "Klişe cümleler kullanmazsın. Gözlemin ve sezginle çok özgün, kişiye özel bir şey söylersin.\n\n"
+        "SARE PERFUME KATALOĞU:\n"
+        + PERFUME_CATALOG_TEXT
+        + "\n\n"
+        + image_instruction
+        + "\nGÖREVİN:\n"
+        "1. Müşterinin paylaştığı metin veya fotoğrafı derinlemesine oku.\n"
+        "2. Enerji, tarz, duygu ve karakterden yola çıkarak katalogdan EN UYGUN 3 parfümü seç.\n"
+        "3. Her seçim için müşteriye doğrudan seslenen, 2-3 cümlelik, etkileyici ve "
+        "TAMAMEN KİŞİYE ÖZEL bir açıklama yaz.\n"
+        "   - Onun hakkında fark ettiğin özgün bir detaydan başla.\n"
+        "   - Parfümün hangi notası o detayla neden örtüşüyor, bunu şiirsel ama sade anlat.\n"
+        "   - Sonu bir gözlem veya davetle bitir, soru işaretiyle bitirme.\n\n"
+        "YANIT FORMATI — SADECE GEÇERLİ JSON, başka hiçbir şey yazma:\n"
+        '{"recommendations": [{"kimlik": "katalogdaki-handle", "aciklama": "2-3 cümle"}]}'
+    )
+
+
+# ─────────────────────────────────────────────
+# YARDIMCI: KULLANICIYA ŞIK HATA
+# ─────────────────────────────────────────────
+USER_ERRORS = {
+    "quota"  : "Koku uzmanımız şu an çok yoğun — birazdan tekrar dene.",
+    "blocked": "Bu sorgu işlenemedi. Farklı bir şekilde anlatmayı dener misin?",
+    "timeout": "Bağlantı zaman aşımına uğradı. Lütfen tekrar dene.",
+    "default": "Beklenmedik bir sorun oluştu. Lütfen birkaç saniye sonra tekrar dene.",
+}
+
+def user_error(kind="default", status=500):
+    return jsonify({"error": USER_ERRORS.get(kind, USER_ERRORS["default"])}), status
+
+
+# ─────────────────────────────────────────────
+# ANA ENDPOINT
+# ─────────────────────────────────────────────
 @app.route("/recommend", methods=["POST"])
 def recommend():
-    if not GEMINI_API_KEY:
-        return jsonify({"error": "Sistem hatası: API Key eksik."}), 500
-    
+    if not client:
+        return user_error("default")
+
     try:
-        data = request.get_json()
-        query = data.get("query", "").strip()
-        img_data = data.get("image", None)
+        data = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        return jsonify({"error": "Geçersiz istek formatı."}), 400
 
-        # --- PROMPT GÜNCELLEMESİ ---
-        # AI'ya katalogdaki 'KİMLİK' bilgisini tam kullanması gerektiğini vurguluyoruz
-        prompt = (
-            "Sen samimi bir niş parfüm uzmanısın. Katalogdaki ürünleri kullanarak tavsiye ver.\n"
-            f"Katalog:\n{CATALOG_TEXT}\n\n"
-            "GÖREV: Kullanıcının havasına/görüntüsüne göre katalogdan 3 parfüm seç.\n"
-            "KURALLAR:\n"
-            "1. Sadece katalogdaki 'KİMLİK' (Handle) bilgilerini kullan.\n"
-            "2. Yanıtın mutlaka geçerli bir JSON olmalı.\n"
-            "3. Üslubun dükkanda kahve içiyormuşuz gibi çok doğal ve reklamsız olsun.\n"
-            "YANIT FORMATI:\n"
-            '{"recommendations": [{"kimlik": "handle-adi", "aciklama": "kısa ve samimi yorum"}]}'
+    user_query   = (data.get("query") or "").strip()
+    image_base64 = data.get("image")
+
+    if not user_query and not image_base64:
+        return jsonify({"error": "Lütfen bir şeyler yazın veya fotoğraf yükleyin."}), 400
+
+    has_image     = bool(image_base64)
+    content_parts = [build_prompt(user_query, has_image)]
+
+    if user_query:
+        content_parts.append(f"Müşteri mesajı: {user_query}")
+
+    if has_image:
+        try:
+            img_str   = image_base64.split(",", 1)[-1] if "," in image_base64 else image_base64
+            img_bytes = base64.b64decode(img_str)
+            mime = "image/jpeg"
+            if image_base64.startswith("data:image/png"):
+                mime = "image/png"
+            elif image_base64.startswith("data:image/webp"):
+                mime = "image/webp"
+            content_parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime))
+        except Exception as exc:
+            logging.warning(f"Resim çözümleme hatası: {exc}")
+            return jsonify({"error": "Resim formatı desteklenmiyor. JPG veya PNG yükle."}), 400
+
+    t0 = time.time()
+    try:
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=content_parts,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.85,
+                max_output_tokens=1024,
+            ),
         )
+        logging.info(f"Gemini yanıt: {time.time()-t0:.2f}s")
 
-        # Gemini API Parçaları
-        contents_parts = [{"text": prompt}]
-        if query:
-            contents_parts.append({"text": f"Müşteri mesajı: {query}"})
-        
-        if img_data:
-            # Base64 temizleme ve MIME type tespiti
-            mime_type = "image/jpeg"
-            if "," in img_data:
-                header, img_data = img_data.split(",")
-                if "png" in header: mime_type = "image/png"
-            
-            contents_parts.append({
-                "inlineData": {
-                    "mimeType": mime_type,
-                    "data": img_data
-                }
-            })
+    except Exception as exc:
+        err = str(exc).lower()
+        logging.error(f"Gemini API hatası: {exc}")
+        if "quota" in err or "429" in err:
+            return user_error("quota", 429)
+        if "blocked" in err:
+            return user_error("blocked", 400)
+        if "timeout" in err or "deadline" in err:
+            return user_error("timeout", 504)
+        return user_error("default")
 
-        # API İsteği
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": [{"parts": contents_parts}],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "temperature": 0.7 # Biraz yaratıcılık ekler
-            }
-        }
+    raw_text = ""
+    try:
+        raw_text = response.text.strip()
+        raw_text = re.sub(r"^```(?:json)?", "", raw_text).rstrip("`").strip()
+        gemini_data = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        logging.error(f"JSON parse hatası. Ham yanıt:\n{raw_text}\nHata: {exc}")
+        return user_error("default")
 
-        resp = requests.post(url, json=payload, timeout=30)
-        resp_json = resp.json()
+    final_results = []
+    for rec in gemini_data.get("recommendations", []):
+        handle = (rec.get("kimlik") or "").strip()
+        if not handle or handle not in PRODUCT_DB:
+            logging.warning(f"Bilinmeyen handle: '{handle}'")
+            continue
+        prod = PRODUCT_DB[handle]
+        final_results.append({
+            "title"      : prod["title"],
+            "url"        : prod["url"],
+            "image"      : prod["image"],
+            "description": (rec.get("aciklama") or "").strip(),
+        })
 
-        # Hata kontrolü
-        if "candidates" not in resp_json:
-            logging.error(f"Gemini Hatası: {resp_json}")
-            return jsonify({"error": "AI yanıt veremedi, lütfen tekrar dene."}), 200
+    if not final_results:
+        return jsonify({"error": "Size özel bir öneri oluşturulamadı. Farklı bir şey yazar mısınız?"}), 200
 
-        # JSON Yanıtını Ayrıştırma
-        raw_text = resp_json['candidates'][0]['content']['parts'][0]['text']
-        res_data = json.loads(raw_text)
-        
-        final_recommendations = []
-        for r in res_data.get("recommendations", []):
-            handle = r.get("kimlik", "").strip()
-            if handle in PRODUCT_DB:
-                product = PRODUCT_DB[handle]
-                final_recommendations.append({
-                    "title": product["title"],
-                    "url": product["url"],
-                    "image": product["image"],
-                    "description": r.get("aciklama", "Sana çok yakışacağını düşündüğüm bir koku.")
-                })
+    return jsonify({"recommendations": final_results})
 
-        return jsonify({"recommendations": final_recommendations})
 
-    except Exception as e:
-        logging.error(f"İşlem hatası: {e}")
-        return jsonify({"error": "Bir şeyler ters gitti, butik kapalı olabilir :)"}), 200
+# ─────────────────────────────────────────────
+# SAĞLIK KONTROLÜ
+# ─────────────────────────────────────────────
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status"         : "ok",
+        "products_loaded": len(PRODUCT_DB),
+        "gemini_ready"   : client is not None,
+    })
 
-@app.route("/")
-def home(): 
-    return jsonify({"status": "Sare API Aktif", "product_count": len(PRODUCT_DB)})
 
 if __name__ == "__main__":
-    # Render/Heroku gibi platformlar için PORT ayarı
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)
