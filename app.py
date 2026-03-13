@@ -37,7 +37,7 @@ else:
     logging.info(f"{len(API_KEYS)} adet API anahtarı yüklendi.")
 
 # Model tercihi — önce hız/kota dengesi iyi olan
-MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite"]
 
 CSV_FILE_NAME    = "products_export_1 (2).csv"
 PLACEHOLDER_IMG  = "https://via.placeholder.com/150?text=Sare+Perfume"
@@ -114,67 +114,74 @@ def build_prompt(has_image):
 # ─────────────────────────────────────────────────────────
 def call_gemini(parts: list) -> dict:
     """
-    API anahtarlarını ve modelleri sırayla dener.
-    429 alırsa sıradaki anahtara/modele geçer.
-    Başarılı yanıtı dict olarak döndürür, hata olursa exception fırlatır.
+    Tüm anahtarları dener. 429'da kısa bekleyip tekrar dener (max 2 tur).
     """
     if not API_KEYS:
         raise Exception("NO_KEYS")
 
-    keys_to_try = API_KEYS.copy()
-    random.shuffle(keys_to_try)  # her istekte farklı anahtarla başla = yük dengesi
+    payload = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {
+            "temperature": 0.85,
+            "maxOutputTokens": 1024
+        }
+    }
 
     last_error = None
+
     for model in MODELS:
-        for key in keys_to_try:
-            url = (
-                f"https://generativelanguage.googleapis.com/v1beta/models/"
-                f"{model}:generateContent?key={key}"
-            )
-            payload = {
-                "contents": [{"parts": parts}],
-                "generationConfig": {
-                    "temperature": 0.85,
-                    "maxOutputTokens": 1024
-                }
-            }
-            try:
-                r = requests.post(url, json=payload, timeout=30)
-                if r.status_code == 200:
-                    logging.info(f"Başarılı: model={model}, key=...{key[-6:]}")
-                    return r.json()
-                elif r.status_code == 429:
-                    logging.warning(f"429 kota: model={model}, key=...{key[-6:]}")
-                    last_error = "QUOTA"
-                    time.sleep(0.3)
+        # Her model için anahtarları 2 tur dene (ilk tur hızlı, ikinci tur bekleyerek)
+        for attempt in range(2):
+            keys_to_try = API_KEYS.copy()
+            random.shuffle(keys_to_try)
+
+            if attempt == 1:
+                logging.info(f"Tüm keyler 429 verdi, 3s bekleyip tekrar deneniyor: {model}")
+                time.sleep(3)
+
+            for key in keys_to_try:
+                url = (
+                    f"https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{model}:generateContent?key={key}"
+                )
+                try:
+                    r = requests.post(url, json=payload, timeout=30)
+                    if r.status_code == 200:
+                        logging.info(f"✅ Başarılı: model={model}, key=...{key[-6:]}")
+                        return r.json()
+                    elif r.status_code == 429:
+                        logging.warning(f"429: model={model}, key=...{key[-6:]}")
+                        last_error = "QUOTA"
+                        time.sleep(0.2)
+                        continue
+                    elif r.status_code == 403:
+                        logging.warning(f"403 API aktif değil: key=...{key[-6:]}")
+                        last_error = "API_DISABLED"
+                        continue
+                    elif r.status_code == 404:
+                        logging.warning(f"404 model yok: {model}")
+                        last_error = "BAD_REQUEST"
+                        break  # sonraki modele geç
+                    elif r.status_code == 400:
+                        body = r.json()
+                        if "blocked" in str(body).lower():
+                            raise Exception("BLOCKED")
+                        logging.warning(f"400: {body}")
+                        last_error = "BAD_REQUEST"
+                        break
+                    else:
+                        logging.warning(f"HTTP {r.status_code}: {r.text[:150]}")
+                        last_error = f"HTTP_{r.status_code}"
+                        continue
+                except requests.Timeout:
+                    logging.warning(f"Timeout: {model}, key=...{key[-6:]}")
+                    last_error = "TIMEOUT"
                     continue
-                elif r.status_code == 403:
-                    # API etkinleştirilmemiş — bu anahtarı atla, diğerine geç
-                    logging.warning(f"403 API aktif değil: key=...{key[-6:]} model={model} — atlanıyor")
-                    last_error = "API_DISABLED"
-                    continue
-                elif r.status_code == 404:
-                    # Model bu versiyonda yok — bir sonraki modele geç
-                    logging.warning(f"404 model bulunamadı: {model} — sonraki modele geçiliyor")
-                    last_error = "BAD_REQUEST"
-                    break  # bu model için tüm keyleri denedik, sonraki modele geç
-                elif r.status_code == 400:
-                    body = r.json()
-                    if "blocked" in str(body).lower():
-                        raise Exception("BLOCKED")
-                    logging.warning(f"400 hatası: {body}")
-                    last_error = "BAD_REQUEST"
-                    break
-                else:
-                    logging.warning(f"HTTP {r.status_code}: {r.text[:200]}")
-                    last_error = f"HTTP_{r.status_code}"
-                    continue
-            except requests.Timeout:
-                logging.warning(f"Timeout: model={model}, key=...{key[-6:]}")
-                last_error = "TIMEOUT"
-                continue
-            except Exception as e:
-                raise e
+                except Exception as e:
+                    raise e
+            else:
+                continue  # iç döngü break ile çıkmadıysa devam et
+            break  # 404/400 ile break → dış döngüye (model döngüsüne) geç
 
     raise Exception(last_error or "ALL_FAILED")
 
