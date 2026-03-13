@@ -86,7 +86,7 @@ def load_products():
         PERFUME_CATALOG_TEXT = "HATA: Katalog bulunamadı."
         return
     lines, db = [], {}
-    # Tüm ürünleri DB'ye yükle (resim/url için) ama AI'ya max 100 ürün gönder
+    # Tüm ürünleri DB'ye yükle (resim/url için) ama AI'ya max 80 ürün gönder
     try:
         with open(csv_path, encoding='utf-8-sig') as f:
             for row in csv.DictReader(f):
@@ -99,8 +99,18 @@ def load_products():
                         "image": row.get('Image Src', '').strip() or PLACEHOLDER_IMG,
                         "url"  : f"{PRODUCT_BASE_URL}{handle}"
                     }
-                    tags = row.get('Tags','').strip()
-                    lines.append(f"{handle}|{title}|{tags}")
+                    tags     = row.get('Tags','').strip()
+                    koku     = row.get('Koku (product.metafields.shopify.scent)','').strip()
+                    mevsim   = row.get('Mevsim (product.metafields.shopify.season)','').strip()
+                    cinsiyet = row.get('Hedef Cinsiyet (product.metafields.shopify.target-gender)','').strip()
+                    etkinlik = row.get('Etkinlik (product.metafields.shopify.occasion)','').strip()
+                    # Body HTML'den ilk 200 karakter özet çıkar
+                    body_raw = row.get('Body (HTML)','')
+                    body_clean = re.sub(r'<[^>]+>', '', body_raw).strip()
+                    body_short = body_clean[:200].replace('\n',' ').replace('|',' ')
+                    # Zengin katalog satırı
+                    meta = " | ".join(filter(None, [koku, mevsim, cinsiyet, etkinlik]))
+                    lines.append(f"{handle}|{title}|{tags}|{meta}|{body_short}")
         PRODUCT_DB = db
         PERFUME_ALL_LINES[:] = lines  # tüm ürün satırlarını sakla
         # Varsayılan katalog: rastgele 100 ürün — her deploy'da farklı başlangıç
@@ -121,15 +131,27 @@ load_products()
 # Sorguya göre ilgili ürünleri filtreler, token tasarrufu sağlar
 # ─────────────────────────────────────────────────────────
 KOKU_KEYWORDS = {
-    "odunsu"  : ["woody", "wood", "oud", "santal", "cedar", "patchouli", "odunsu"],
-    "çiçeksi" : ["floral", "rose", "jasmine", "çiçek", "lavender", "violet", "flower"],
-    "meyveli" : ["fruity", "fruit", "berry", "citrus", "meyve", "apple", "peach"],
-    "baharatlı": ["spicy", "spice", "baharat", "pepper", "cinnamon", "cardamom"],
-    "oryantal" : ["oriental", "amber", "musk", "oryantal", "vanilla", "resin"],
-    "taze"    : ["fresh", "aqua", "marine", "taze", "green", "mint", "ocean"],
-    "erkek"   : ["men", "homme", "erkek", "masculine"],
-    "kadın"   : ["women", "femme", "kadın", "feminine", "pour femme"],
-    "unisex"  : ["unisex", "nötr"],
+    # Koku aileleri — metafield değerleriyle eşleşecek şekilde genişletildi
+    "odunsu"   : ["woody", "wood", "oud", "santal", "cedar", "patchouli", "odunsu", "agac"],
+    "çiçeksi"  : ["floral", "rose", "jasmine", "çiçek", "cicek", "lavender", "violet", "flower", "beyaz cicek"],
+    "meyveli"  : ["fruity", "fruit", "berry", "citrus", "meyve", "meyveli", "apple", "peach", "incir", "elma"],
+    "baharatlı": ["spicy", "spice", "baharat", "baharatli", "pepper", "cinnamon", "cardamom", "karanfil"],
+    "oryantal" : ["oriental", "amber", "musk", "oryantal", "vanilla", "resin", "buhur", "vanilya"],
+    "taze"     : ["fresh", "aqua", "marine", "taze", "green", "mint", "ocean", "deniz", "narenciye", "citrus"],
+    "gourmand" : ["gourmand", "chocolate", "caramel", "food", "tatli", "tatlı", "kahve", "vanilya"],
+    # Cinsiyet — metafield: "erkek", "kadin", "uniseks"
+    "erkek"    : ["erkek", "men", "homme", "masculine", "bay"],
+    "kadın"    : ["kadin", "kadın", "women", "femme", "feminine", "bayan"],
+    "unisex"   : ["uniseks", "unisex", "nötr", "notr"],
+    # Mevsim — metafield: "ilkbahar", "yaz", "sonbahar", "kis"
+    "yaz"      : ["yaz", "summer", "sahil", "plaj", "deniz", "sicak", "sıcak"],
+    "kış"      : ["kis", "kış", "winter", "soguk", "soğuk"],
+    "ilkbahar" : ["ilkbahar", "spring", "taze"],
+    # Etkinlik — metafield değerleri
+    "spor"     : ["spor", "sport", "aktif", "gym", "kosu", "koşu"],
+    "ofis"     : ["ofis", "is-hayati", "gunduz", "günlük"],
+    "gece"     : ["gece", "aksam", "aksam-davetleri", "ozel-durum", "parti"],
+    "romantik" : ["romantik", "sevgili", "ask", "aşk", "bulusma", "buluşma", "date"],
 }
 
 def smart_catalog(query: str, max_items: int = 80) -> str:
@@ -332,73 +354,75 @@ def build_prompt(has_image, user_query=""):
 
     # Muadil arama modu
     if user_query and not has_image and is_muadil_query(user_query):
+        catalog = muadil_catalog(user_query)
         return (
-            "Sen Sare Parfüm'ün uzman danışmanısın. Sare, dünyaca ünlü parfümlerin "
-            "muadillerini üretiyor — aynı koku ailesi, çok daha uygun fiyat.\n\n"
-            "KATALOG (format: handle|isim|etiketler):\n" + muadil_catalog(user_query) + "\n\n"
+            "Sen Sare Parfüm'ün uzman danışmanısın. Sare, dünyaca ünlü parfümlerin muadillerini üretiyor.\n\n"
+            "KATALOG (format: handle|isim|etiketler):\n" + catalog + "\n\n"
             "GÖREV: Müşterinin aradığı orijinal parfümün Sare muadilini katalogdan bul.\n"
-            "ÖNEMLİ KURALLAR:\n"
-            "1. Etiketlerde 'Muadili' kelimesi geçen veya orijinal parfüm/marka adı etiketlerde olan ürünü seç\n"
-            "2. Müşteri tam adı yazamayabilir veya Türkçe harflerle yazabilir — "
-            "'nişhane'='nishane', 'dior savaş'='Dior Sauvage', 'blö de şanel'='Bleu de Chanel', "
-            "'şanel no5'='Chanel No5' gibi yorum yap\n"
-            "3. Doğru muadili bulduysan 1 ürün yeterli, birden fazla seçenek varsa max 3 öner\n"
-            "4. Açıklamada: hangi orijinal parfümün muadili olduğunu yaz, koku karakterini anlat, "
-            "fiyat avantajından bahset\n\n"
+            "KURALLAR:\n"
+            "1. Etiketlerde orijinal parfüm/marka adı geçen ürünü seç\n"
+            "2. Müşteri yanlış yazabilir — 'nişhane'='nishane', 'dior savaş'='Dior Sauvage', "
+            "'şanel'='chanel' gibi yorum yap\n"
+            "3. Doğru muadili bulduysan 1 ürün yeterli, max 3 öner\n"
+            "4. Açıklamada: hangi parfümün muadili olduğunu belirt, sonra o parfümün "
+            "karakterini duyusal anlat — tıpkı o kokuyu ilk kez deneyimliyor gibi. "
+            "FİYAT veya 'daha uygun' gibi ifade KULLANMA.\n\n"
             "SADECE JSON döndür:\n"
             '{"recommendations":[{"kimlik":"handle-degeri","aciklama":"açıklama"}]}'
         )
 
     # Bağlam analizi
     ctx = detect_user_context(user_query)
-    
-    # Cinsiyet notu oluştur
+
+    # Cinsiyet notu
     cinsiyet_notu = ""
     if ctx["user_gender"] == "kadın":
         cinsiyet_notu = (
-            "\nCİNSİYET BAĞLAMI: Kullanıcı kadın. 'Erkek arkadaşım', 'sevgilim', 'eşim' gibi "
-            "ifadeler kullanmış — bu KENDİSİ için parfüm arıyor demektir, erkek parfümü değil. "
-            "SADECE kadın veya unisex parfüm öner.\n"
+            "\nCİNSİYET: Kullanıcı kadın ('erkek arkadaşım/sevgilim/eşim' dedi = kendisi için arıyor). "
+            "SADECE kadın veya unisex parfüm öner, erkek parfümü asla.\n"
         )
     elif ctx["user_gender"] == "erkek":
-        cinsiyet_notu = (
-            "\nCİNSİYET BAĞLAMI: Kullanıcı erkek. SADECE erkek veya unisex parfüm öner.\n"
-        )
+        cinsiyet_notu = "\nCİNSİYET: Kullanıcı erkek. SADECE erkek veya unisex parfüm öner.\n"
 
     # Ortam notu
-    ortam_ornekleri = {
-        "sahil": "Güneş teninde, saçlarında tuz var. Deniz rüzgarı seni saçlarından öpüyor. "
-                 "Bu an için: narenciye, tuz, aqua, taze çiçek notaları. Asla ağır oud veya oryantal değil.",
-        "spor": "Ter değil, enerji kokusu. Spor sonrası bile taze hissettirecek, "
-                "hafif ve uzun süre yayılan bir koku. Aqua, yeşil, hafif ahşap notaları.",
-        "ofis": "Zarif ama iddia sahibi. Çevreyi rahatsız etmeyen, ama odaya girince "
-                "fark ettiren bir koku. Pudralı, odunsu veya hafif çiçekli.",
-        "gece": "Gecenin enerjisi. Loş ışıklar, müzik, yakın mesafe. "
-                "Kalıcı, derin, unutulmaz. Oryantal, amber, misk notaları öne çıkabilir.",
-        "bulusma": "Karşındaki seni ilk gördüğünde değil, ilk kokladığında hatırlayacak. "
-                   "Büyüleyici ama agresif değil. Floral, misk, hafif baharatlı notalar.",
-        "dugun": "Özel bir gün, özel bir koku. Yıllarca hatırlarda kalacak. "
-                 "İddiasız ama asil. Beyaz çiçekler, pudra, ince odun.",
-        "genel": "Müşterinin anlattığı ana ve ruh haline tam uyan bir koku seç."
+    ortam_map = {
+        "sahil":    "narenciye, tuz, aqua, deniz, taze çiçek — ağır oud/oryantal/vanilya KESİNLİKLE yasak",
+        "spor":     "hafif, temiz, uzun süre yayılan, aqua veya yeşil notalar — ağır değil",
+        "ofis":     "zarif, nötr, çevreyi rahatsız etmeyecek yoğunlukta, pudralı veya hafif odunsu",
+        "gece":     "kalıcı, derin, oryantal/amber/misk olabilir — gecenin enerjisi",
+        "bulusma":  "hafif baştan çıkarıcı, yakın mesafede iz bırakan, floral veya misk ağırlıklı",
+        "dugun":    "asil, temiz, beyaz çiçekler veya pudralı — saldırgan değil",
+        "genel":    "müşterinin mesajındaki his ve ortama en uygun"
     }
-    ortam_notu = ortam_ornekleri.get(ctx["occasion"], ortam_ornekleri["genel"])
+    ortam_notu = ortam_map.get(ctx["occasion"], ortam_map["genel"])
+
+    # Katalog
+    catalog = smart_catalog(user_query)
 
     # Normal öneri modu
     return (
-        "Sen Sare Parfüm'ün koku uzmanısın. Kokuları satmıyorsun, anları ve duyguları "
-        "kelimelere döküyorsun. Her önerin bir hikaye, bir his, bir an.\n\n"
-        "KATALOG (format: handle|isim|etiketler):\n" + smart_catalog(user_query) + "\n\n"
+        "Sen dünyanın en iyi parfüm butiklerinde yıllarca çalışmış bir koku uzmanısın. "
+        "Parfümleri koku piramidiyle değil, duygularla anlatıyorsun.\n\n"
+        "KATALOG (format: handle|başlık|etiketler|koku_ailesi|mevsim|cinsiyet|etkinlik|açıklama):\n"
+        + catalog + "\n\n"
         + img_note + cinsiyet_notu +
-        f"\nORTAM: {ortam_notu}\n\n"
-        "GÖREV: Katalogdan ortama ve kullanıcıya EN UYGUN 3 parfümü seç.\n\n"
-        "AÇIKLAMA KURALLARI — ÇOK ÖNEMLİ:\n"
-        "1. Her açıklama o anı YAŞATMALI. Teknik not listesi değil, sinematik bir sahne.\n"
-        "   YANLIŞ: 'Bu parfüm turunçgil ve sandal ağacı notaları içerir.'\n"
-        "   DOĞRU: 'Güneş henüz yükseliyor, teninde dün gecenin tuzlu havası var — "
-        "bu koku tam o sınırda duruyor, denizden çıkmış gibi temiz, ama gizemli.'\n"
-        "2. Müşterinin anlattığı detayı (sahil, buluşma, yaş, his) açıklamaya yansıt.\n"
-        "3. Sonu güçlü bitir: neden BU an için biçilmiş kaftan olduğunu hissettir.\n"
-        "4. Klişe yasak: 'etkileyici', 'büyüleyici', 'özel' gibi boş kelimeler kullanma.\n\n"
+        f"\nORTAM/KATEGORİ: {ortam_notu}\n\n"
+        "KENDİ BİLGİNİ KULLAN: Katalogdaki ürünlerin ilham aldığı orijinal parfümleri "
+        "(Acqua Di Parma, Amouage, Chanel vb.) zaten biliyorsun. O parfümlerin "
+        "gerçek notalarını, karakterini ve duygusal etkisini kendi bilginle açıklamaya yansıt.\n\n"
+        "GÖREV: Katalogdan bu ortama ve kişiye EN UYGUN 3 parfümü seç.\n\n"
+        "AÇIKLAMA KURALLARI:\n"
+        "1. SAHNE KUR: Her parfüm için 3-4 cümlelik küçük bir an yaz. "
+        "Müşteri o kokuyu henüz bilmiyor — onu merak ettir, satın aldır.\n"
+        "   YANLIŞ ➜ 'Turunçgil ve sandal ağacı notaları içerir, uzun süre kalıcıdır.'\n"
+        "   DOĞRU  ➜ 'Sabah sekizde sahile iniyorsun, güneş henüz ısıtmamış havayı. "
+        "Teninde bir gece öncesinin tuzlu kokusu var. Bu parfüm tam o sınırda duruyor — "
+        "denizden yeni çıkmış gibi temiz, ama arkasında seni bırakmayan belirsiz bir derinlik var.'\n"
+        "2. KİŞİSELLEŞTİR: Müşterinin yazdığı detayı (sahil, buluşma, spor vb.) sahneye yansıt.\n"
+        "3. MERAK BIRAK: Açıklamanın sonu 'acaba nasıldır' dedirtmeli.\n"
+        "4. YASAK: 'etkileyici', 'büyüleyici', 'özel', 'fiyatı uygun', 'daha uygun', "
+        "'kaliteli', 'mükemmel', 'harika' — boş klişe kelimeler kullanma.\n"
+        "5. FİYAT: Fiyat veya maliyet hakkında hiçbir şey yazma.\n\n"
         "SADECE JSON döndür:\n"
         '{"recommendations":[{"kimlik":"handle-degeri","aciklama":"3-4 cümle"}]}'
     )
@@ -559,6 +583,7 @@ def recommend():
     # Groq önce dene (metin sorgusu veya sadece metin), Gemini yedek
     raw_json = None
     prompt_text = build_prompt(has_image, user_query)
+
     if user_query and not has_image and GROQ_KEYS:
         # Sadece metin → Groq kullan (daha hızlı ve cömert)
         try:
