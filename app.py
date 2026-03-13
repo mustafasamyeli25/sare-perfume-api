@@ -37,7 +37,7 @@ else:
     logging.info(f"{len(API_KEYS)} adet API anahtarı yüklendi.")
 
 # Model tercihi — önce hız/kota dengesi iyi olan
-MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+MODELS = ["gemini-2.0-flash", "gemini-1.5-flash"]
 
 CSV_FILE_NAME    = "products_export_1 (2).csv"
 PLACEHOLDER_IMG  = "https://via.placeholder.com/150?text=Sare+Perfume"
@@ -145,17 +145,27 @@ def call_gemini(parts: list) -> dict:
                     logging.info(f"Başarılı: model={model}, key=...{key[-6:]}")
                     return r.json()
                 elif r.status_code == 429:
-                    logging.warning(f"429 kota aşıldı: model={model}, key=...{key[-6:]}")
+                    logging.warning(f"429 kota: model={model}, key=...{key[-6:]}")
                     last_error = "QUOTA"
                     time.sleep(0.3)
                     continue
+                elif r.status_code == 403:
+                    # API etkinleştirilmemiş — bu anahtarı atla, diğerine geç
+                    logging.warning(f"403 API aktif değil: key=...{key[-6:]} — bu anahtar atlanıyor")
+                    last_error = "QUOTA"
+                    continue
+                elif r.status_code == 404:
+                    # Model bu versiyonda yok — bir sonraki modele geç
+                    logging.warning(f"404 model bulunamadı: {model} — sonraki modele geçiliyor")
+                    last_error = "BAD_REQUEST"
+                    break  # bu model için tüm keyleri denedik, sonraki modele geç
                 elif r.status_code == 400:
                     body = r.json()
                     if "blocked" in str(body).lower():
                         raise Exception("BLOCKED")
                     logging.warning(f"400 hatası: {body}")
                     last_error = "BAD_REQUEST"
-                    break  # bu model için diğer anahtarı deneme
+                    break
                 else:
                     logging.warning(f"HTTP {r.status_code}: {r.text[:200]}")
                     last_error = f"HTTP_{r.status_code}"
