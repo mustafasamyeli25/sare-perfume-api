@@ -15,11 +15,15 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 # ─────────────────────────────────────────────────────────
 def get_api_keys():
     keys = []
-    # Tek anahtar (geriye dönük uyumluluk)
+    # GEMINI_API_KEY içinde virgülle ayrılmış birden fazla anahtar desteklenir
+    # Örnek: AIza...1,AIza...2,AIza...3
     single = os.environ.get("GEMINI_API_KEY", "").strip()
     if single:
-        keys.append(single)
-    # Çoklu anahtarlar
+        for k in single.split(","):
+            k = k.strip()
+            if k:
+                keys.append(k)
+    # Ayrı değişkenler de desteklenir: GEMINI_API_KEY_1, GEMINI_API_KEY_2 ...
     for i in range(1, 10):
         k = os.environ.get(f"GEMINI_API_KEY_{i}", "").strip()
         if k:
