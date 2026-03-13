@@ -37,7 +37,7 @@ else:
     logging.info(f"{len(API_KEYS)} adet API anahtarı yüklendi.")
 
 # Model tercihi — önce hız/kota dengesi iyi olan
-MODELS = ["gemini-2.0-flash", "gemini-1.5-flash"]
+MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash-latest", "gemini-1.5-flash-001"]
 
 CSV_FILE_NAME    = "products_export_1 (2).csv"
 PLACEHOLDER_IMG  = "https://via.placeholder.com/150?text=Sare+Perfume"
@@ -128,7 +128,7 @@ def call_gemini(parts: list) -> dict:
     for model in MODELS:
         for key in keys_to_try:
             url = (
-                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"https://generativelanguage.googleapis.com/v1/models/"
                 f"{model}:generateContent?key={key}"
             )
             payload = {
@@ -151,8 +151,8 @@ def call_gemini(parts: list) -> dict:
                     continue
                 elif r.status_code == 403:
                     # API etkinleştirilmemiş — bu anahtarı atla, diğerine geç
-                    logging.warning(f"403 API aktif değil: key=...{key[-6:]} — bu anahtar atlanıyor")
-                    last_error = "QUOTA"
+                    logging.warning(f"403 API aktif değil: key=...{key[-6:]} model={model} — atlanıyor")
+                    last_error = "API_DISABLED"
                     continue
                 elif r.status_code == 404:
                     # Model bu versiyonda yok — bir sonraki modele geç
@@ -187,7 +187,8 @@ ERROR_MAP = {
     "QUOTA"      : ("Koku uzmanımız şu an çok meşgul, lütfen birkaç saniye sonra tekrar dene.", 429),
     "BLOCKED"    : ("Bu içerik işlenemedi. Farklı bir şekilde yazar mısın?", 400),
     "TIMEOUT"    : ("Bağlantı zaman aşımına uğradı. Tekrar dene.", 504),
-    "ALL_FAILED" : ("Servis geçici olarak kullanılamıyor. Birazdan tekrar dene.", 503),
+    "ALL_FAILED"    : ("Servis geçici olarak kullanılamıyor. Birazdan tekrar dene.", 503),
+    "API_DISABLED" : ("Servis yapılandırma hatası. Lütfen bizimle iletişime geçin.", 503),
 }
 
 def err(kind, status=None):
@@ -260,6 +261,51 @@ def recommend():
         return jsonify({"error": "Size özel öneri oluşturulamadı. Farklı bir şey dener misiniz?"}), 200
 
     return jsonify({"recommendations": results})
+
+
+
+# ─────────────────────────────────────────────────────────
+# TEST ENDPOINT — hangi anahtar/model çalışıyor?
+# Tarayıcıdan: https://sare-perfume-api.vercel.app/test
+# ─────────────────────────────────────────────────────────
+@app.route("/test", methods=["GET"])
+def test_keys():
+    results = []
+    test_payload = {
+        "contents": [{"parts": [{"text": "Say hello in one word."}]}],
+        "generationConfig": {"maxOutputTokens": 10}
+    }
+    for model in MODELS:
+        for key in API_KEYS:
+            url = (
+                f"https://generativelanguage.googleapis.com/v1/models/"
+                f"{model}:generateContent?key={key}"
+            )
+            try:
+                r = requests.post(url, json=test_payload, timeout=10)
+                results.append({
+                    "model": model,
+                    "key_tail": f"...{key[-8:]}",
+                    "status": r.status_code,
+                    "ok": r.status_code == 200,
+                    "msg": r.json().get("error", {}).get("message", "OK")[:120] if r.status_code != 200 else "✅ ÇALIŞIYOR"
+                })
+                if r.status_code == 200:
+                    break  # bu model çalışıyor, diğer keyleri test etme
+            except Exception as e:
+                results.append({
+                    "model": model,
+                    "key_tail": f"...{key[-8:]}",
+                    "status": 0,
+                    "ok": False,
+                    "msg": str(e)[:120]
+                })
+    working = [r for r in results if r["ok"]]
+    return jsonify({
+        "total_keys": len(API_KEYS),
+        "working_combinations": len(working),
+        "results": results
+    })
 
 # ─────────────────────────────────────────────────────────
 # SAĞLIK KONTROLÜ
