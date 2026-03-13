@@ -24,20 +24,31 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── Environment Variables ─────────────────────────────────────────────────────
-# Hepsi .get() ile alınıyor — eksik variable app'i başlatma aşamasında çökertemez.
-# Endpoint çağrısında eksikse anlamlı hata mesajı döner.
+# Vercel'deki gerçek variable isimleriyle eşleştirildi
 PINECONE_API_KEY    = os.environ.get("PINECONE_API_KEY", "")
 PINECONE_INDEX      = os.environ.get("PINECONE_INDEX", "sare-perfume")
-PINECONE_HOST       = os.environ.get("PINECONE_HOST", "")   # https://sare-perfume-xxxx.svc.xxx.pinecone.io
+PINECONE_HOST       = os.environ.get("PINECONE_HOST", "")
 
-UPSTASH_REDIS_URL   = os.environ.get("UPSTASH_REDIS_URL", "")
-UPSTASH_REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_TOKEN", "")
+# Upstash — Vercel'de REST_TOKEN / REST_URL olarak kayıtlı
+UPSTASH_REDIS_URL   = (
+    os.environ.get("UPSTASH_REDIS_URL")
+    or os.environ.get("UPSTASH_REDIS_REST_URL", "")
+)
+UPSTASH_REDIS_TOKEN = (
+    os.environ.get("UPSTASH_REDIS_TOKEN")
+    or os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+)
 
-GEMINI_API_KEYS     = [k.strip() for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k.strip()]
-GROQ_API_KEYS       = [k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()]
+# Groq — tek key veya virgülle ayrılmış çoklu key desteklenir
+_groq_raw   = os.environ.get("GROQ_API_KEYS") or os.environ.get("GROQ_API_KEY", "")
+GROQ_API_KEYS = [k.strip() for k in _groq_raw.split(",") if k.strip()]
 
-CACHE_TTL          = int(os.environ.get("CACHE_TTL", 3600))   # seconds
-TOP_K              = int(os.environ.get("TOP_K", 3))
+# Gemini — tek key veya virgülle ayrılmış çoklu key desteklenir
+_gemini_raw   = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEYS = [k.strip() for k in _gemini_raw.split(",") if k.strip()]
+
+CACHE_TTL = int(os.environ.get("CACHE_TTL", 3600))
+TOP_K     = int(os.environ.get("TOP_K", 3))
 
 # ── Key Rotation State ────────────────────────────────────────────────────────
 _groq_idx   = 0
