@@ -206,7 +206,7 @@ Zenginleştirilmiş sorgu:"""
     for _ in range(len(GEMINI_API_KEYS) or 1):
         api_key = next_gemini_key()
         url = (
-            "https://generativelanguage.googleapis.com/v1beta/models"
+            "https://generativelanguage.googleapis.com/v1/models"
             f"/gemini-1.5-flash:generateContent?key={api_key}"
         )
         try:
@@ -427,7 +427,7 @@ async def call_gemini_flash(system: str, user: str) -> dict:
     """Gemini 2.0 Flash fallback."""
     api_key = next_gemini_key()
     url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"https://generativelanguage.googleapis.com/v1/models/"
         f"gemini-1.5-flash:generateContent?key={api_key}"
     )
     payload = {
@@ -464,7 +464,7 @@ async def analyze_style_with_vision(image_bytes: bytes, mime_type: str = "image/
     """Müşterinin kıyafet/stil fotoğrafını analiz et, parfüm önerisi için bağlam üret."""
     api_key = next_gemini_key()
     url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"https://generativelanguage.googleapis.com/v1/models/"
         f"gemini-1.5-flash:generateContent?key={api_key}"
     )
     image_b64 = base64.b64encode(image_bytes).decode()
