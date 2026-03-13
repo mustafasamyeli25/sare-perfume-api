@@ -61,7 +61,7 @@ else:
 MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite"]
 
 # Groq modelleri (birincil — ücretsiz, hızlı, günde 14.400 istek)
-GROQ_MODELS = ["llama-3.1-8b-instant", "gemma2-9b-it", "llama-3.3-70b-versatile"]
+GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it"]
 
 CSV_FILE_NAME    = "products_export_1 (2).csv"
 PLACEHOLDER_IMG  = "https://via.placeholder.com/150?text=Sare+Perfume"
@@ -155,7 +155,7 @@ KOKU_KEYWORDS = {
     "romantik" : ["romantik", "sevgili", "ask", "aşk", "bulusma", "buluşma", "date"],
 }
 
-def smart_catalog(query: str, max_items: int = 25) -> str:
+def smart_catalog(query: str, max_items: int = 15) -> str:
     """Sorguya göre filtrelenmiş katalog döndürür. Eşleşme yoksa ilk max_items ürünü verir."""
     if not query or not PERFUME_ALL_LINES:
         return "\n".join(PERFUME_ALL_LINES[:max_items]) if PERFUME_ALL_LINES else PERFUME_CATALOG_TEXT
@@ -268,22 +268,22 @@ def detect_user_context(query: str) -> dict:
     q = tr_normalize(query)
     context = {"user_gender": "belirsiz", "occasion": "genel", "age_hint": ""}
 
-    # Kadın sinyalleri
+    # Sinyaller normalize edilmiş halde — tr_normalize ile eşleşecek
+    # q zaten tr_normalize edildi
+    # Sadece net cinsiyet belirten ifadeler — belirsiz olanlar dahil edilmedi
     kadin_signals = [
-        "erkek arkadasim", "erkek arkadaşım", "sevgilim", "esim", "eşim",
-        "kocam", "nişanlım", "nisanlim", "bulusuyorum", "buluşuyorum",
-        "randevum var", "date", "buluşma", "flort", "bulusma"
+        "erkek arkadasim", "erkek arkadasiyla", "erkek arkadasimla",
+        "kocam", "kocamla", "esim", "esimle"
     ]
-    # Erkek sinyalleri  
     erkek_signals = [
-        "kız arkadasim", "kız arkadaşım", "sevgilim", "nişanlım",
-        "karım", "karim", "es", "eş"
+        "kiz arkadasim", "kiz arkadasiyla", "kiz arkadasimla",
+        "karim", "karimla"
     ]
 
-    # Kontrol — "erkek arkadaşım" varsa kullanıcı kadındır
-    if any(s in q for s in kadin_signals):
-        context["user_gender"] = "kadın"
-    elif any(s in q for s in erkek_signals):
+    # Kontrol — normalize edilmiş q ile karşılaştır
+    if any(tr_normalize(s) in q for s in kadin_signals):
+        context["user_gender"] = "kadin"
+    elif any(tr_normalize(s) in q for s in erkek_signals):
         context["user_gender"] = "erkek"
 
     # Yaş ipuçları
@@ -339,10 +339,10 @@ def muadil_catalog(query: str) -> str:
     if not matched:
         all_lines = PERFUME_ALL_LINES[:]
         random.shuffle(all_lines)
-        matched = all_lines[:25]
+        matched = all_lines[:15]
 
     logging.info(f"Muadil katalog: {len(search_terms)} terim, {len(matched)} ürün bulundu")
-    return "\n".join(matched[:25])
+    return "\n".join(matched[:15])
 
 def build_prompt(has_image, user_query=""):
     img_note = ""
@@ -377,7 +377,7 @@ def build_prompt(has_image, user_query=""):
 
     # Cinsiyet notu
     cinsiyet_notu = ""
-    if ctx["user_gender"] == "kadın":
+    if ctx["user_gender"] == "kadin":
         cinsiyet_notu = (
             "\nCİNSİYET: Kullanıcı kadın ('erkek arkadaşım/sevgilim/eşim' dedi = kendisi için arıyor). "
             "SADECE kadın veya unisex parfüm öner, erkek parfümü asla.\n"
@@ -402,30 +402,18 @@ def build_prompt(has_image, user_query=""):
 
     # Normal öneri modu
     return (
-        "Sen dünyanın en iyi parfüm butiklerinde yıllarca çalışmış bir koku uzmanısın. "
-        "Parfümleri koku piramidiyle değil, duygularla anlatıyorsun.\n\n"
-        "KATALOG (format: handle|başlık|etiketler|koku_ailesi|mevsim|cinsiyet|etkinlik|açıklama):\n"
-        + catalog + "\n\n"
-        + img_note + cinsiyet_notu +
-        f"\nORTAM/KATEGORİ: {ortam_notu}\n\n"
-        "KENDİ BİLGİNİ KULLAN: Katalogdaki ürünlerin ilham aldığı orijinal parfümleri "
-        "(Acqua Di Parma, Amouage, Chanel vb.) zaten biliyorsun. O parfümlerin "
-        "gerçek notalarını, karakterini ve duygusal etkisini kendi bilginle açıklamaya yansıt.\n\n"
-        "GÖREV: Katalogdan bu ortama ve kişiye EN UYGUN 3 parfümü seç.\n\n"
-        "AÇIKLAMA KURALLARI:\n"
-        "1. SAHNE KUR: Her parfüm için 3-4 cümlelik küçük bir an yaz. "
-        "Müşteri o kokuyu henüz bilmiyor — onu merak ettir, satın aldır.\n"
-        "   YANLIŞ ➜ 'Turunçgil ve sandal ağacı notaları içerir, uzun süre kalıcıdır.'\n"
-        "   DOĞRU  ➜ 'Sabah sekizde sahile iniyorsun, güneş henüz ısıtmamış havayı. "
-        "Teninde bir gece öncesinin tuzlu kokusu var. Bu parfüm tam o sınırda duruyor — "
-        "denizden yeni çıkmış gibi temiz, ama arkasında seni bırakmayan belirsiz bir derinlik var.'\n"
-        "2. KİŞİSELLEŞTİR: Müşterinin yazdığı detayı (sahil, buluşma, spor vb.) sahneye yansıt.\n"
-        "3. MERAK BIRAK: Açıklamanın sonu 'acaba nasıldır' dedirtmeli.\n"
-        "4. YASAK: 'etkileyici', 'büyüleyici', 'özel', 'fiyatı uygun', 'daha uygun', "
-        "'kaliteli', 'mükemmel', 'harika' — boş klişe kelimeler kullanma.\n"
-        "5. FİYAT: Fiyat veya maliyet hakkında hiçbir şey yazma.\n\n"
-        "SADECE JSON döndür:\n"
-        '{"recommendations":[{"kimlik":"handle-degeri","aciklama":"3-4 cümle"}]}'
+        "Sare Parfüm koku uzmanısın. Parfümleri duygularla, sahnelerle anlatıyorsun.\n\n"
+        "KATALOG:\n" + catalog + "\n\n"
+        + img_note + cinsiyet_notu
+        + f"ORTAM: {ortam_notu}\n\n"
+        "Katalogdaki parfümlerin ilham aldığı orijinal markaları (Chanel, Dior, Amouage vb.) "
+        "kendi bilginle açıkla — nota listesi değil, his ve sahne.\n\n"
+        "GÖREV: En uygun 3 parfümü seç. Her biri için FARKLI bir sahne yaz.\n"
+        "- Her açıklama o anı yaşatmalı, kokuyu merak ettirmeli\n"
+        "- 3 açıklama birbirinden tamamen farklı tonda ve sahnede olmalı\n"
+        "- Yasak: fiyat, 'etkileyici', 'büyüleyici', 'özel', tekrar eden kalıplar\n\n"
+        "JSON:\n"
+        '{"recommendations":[{"kimlik":"handle","aciklama":"3 cümle"}]}'
     )
 
 # ─────────────────────────────────────────────────────────
