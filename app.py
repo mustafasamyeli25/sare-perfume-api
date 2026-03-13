@@ -61,7 +61,7 @@ else:
 MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite"]
 
 # Groq modelleri (birincil — ücretsiz, hızlı, günde 14.400 istek)
-GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it"]
+GROQ_MODELS = ["llama-3.1-8b-instant", "gemma2-9b-it", "llama-3.3-70b-versatile"]
 
 CSV_FILE_NAME    = "products_export_1 (2).csv"
 PLACEHOLDER_IMG  = "https://via.placeholder.com/150?text=Sare+Perfume"
@@ -107,10 +107,11 @@ def load_products():
                     # Body HTML'den ilk 200 karakter özet çıkar
                     body_raw = row.get('Body (HTML)','')
                     body_clean = re.sub(r'<[^>]+>', '', body_raw).strip()
-                    body_short = body_clean[:200].replace('\n',' ').replace('|',' ')
+                    body_short = body_clean[:80].replace('\n',' ').replace('|',' ')
                     # Zengin katalog satırı
-                    meta = " | ".join(filter(None, [koku, mevsim, cinsiyet, etkinlik]))
-                    lines.append(f"{handle}|{title}|{tags}|{meta}|{body_short}")
+                    meta = ";".join(filter(None, [koku, mevsim, cinsiyet, etkinlik]))
+                    # tags atıldı — meta (koku/mevsim/cinsiyet) + body_short yeterli
+                    lines.append(f"{handle}|{title}|{meta}|{body_short}")
         PRODUCT_DB = db
         PERFUME_ALL_LINES[:] = lines  # tüm ürün satırlarını sakla
         # Varsayılan katalog: rastgele 100 ürün — her deploy'da farklı başlangıç
@@ -154,7 +155,7 @@ KOKU_KEYWORDS = {
     "romantik" : ["romantik", "sevgili", "ask", "aşk", "bulusma", "buluşma", "date"],
 }
 
-def smart_catalog(query: str, max_items: int = 80) -> str:
+def smart_catalog(query: str, max_items: int = 25) -> str:
     """Sorguya göre filtrelenmiş katalog döndürür. Eşleşme yoksa ilk max_items ürünü verir."""
     if not query or not PERFUME_ALL_LINES:
         return "\n".join(PERFUME_ALL_LINES[:max_items]) if PERFUME_ALL_LINES else PERFUME_CATALOG_TEXT
@@ -338,10 +339,10 @@ def muadil_catalog(query: str) -> str:
     if not matched:
         all_lines = PERFUME_ALL_LINES[:]
         random.shuffle(all_lines)
-        matched = all_lines[:80]
+        matched = all_lines[:25]
 
     logging.info(f"Muadil katalog: {len(search_terms)} terim, {len(matched)} ürün bulundu")
-    return "\n".join(matched[:80])
+    return "\n".join(matched[:25])
 
 def build_prompt(has_image, user_query=""):
     img_note = ""
@@ -430,19 +431,24 @@ def build_prompt(has_image, user_query=""):
 # ─────────────────────────────────────────────────────────
 # GEMİNİ REST API ÇAĞRISI — çoklu anahtar + model fallback
 # ─────────────────────────────────────────────────────────
+GROQ_KEY_INDEX = 0  # Round-robin sayacı
+
 def call_groq(prompt_text: str) -> str:
     """
     Groq API — LLaMA modeli, ücretsiz tier günde 14.400 istek.
-    Görüntü desteği yok, sadece metin.
+    Round-robin key rotation ile rate limit dağıtılır.
     """
+    global GROQ_KEY_INDEX
     if not GROQ_KEYS:
         raise Exception("NO_GROQ_KEYS")
 
-    keys_to_try = GROQ_KEYS.copy()
-    random.shuffle(keys_to_try)
+    # Round-robin: her istek bir sonraki key'den başla
+    n = len(GROQ_KEYS)
+    ordered_keys = [GROQ_KEYS[(GROQ_KEY_INDEX + i) % n] for i in range(n)]
+    GROQ_KEY_INDEX = (GROQ_KEY_INDEX + 1) % n
 
     for model in GROQ_MODELS:
-        for key in keys_to_try:
+        for key in ordered_keys:
             try:
                 r = requests.post(
                     "https://api.groq.com/openai/v1/chat/completions",
@@ -593,7 +599,7 @@ def recommend():
     prompt_text = build_prompt(has_image, user_query)
 
     if user_query and not has_image and GROQ_KEYS:
-        # Sadece metin → Groq kullan (daha hızlı ve cömert)
+        # Her istekte farklı key dene — round-robin ile rate limit dağıt
         try:
             full_prompt = prompt_text + f"\n\nMüşteri mesajı: {user_query}"
             raw_json = call_groq(full_prompt)
@@ -609,6 +615,20 @@ def recommend():
             raw = gemini_response["candidates"][0]["content"]["parts"][0]["text"]
             raw_json = re.sub(r'^```(?:json)?', '', raw.strip()).rstrip('`').strip()
         except Exception as e:
+            # Her iki API de başarısız — katalogdan rastgele 3 ürün öner
+            logging.error(f"Her iki API başarısız: {e}")
+            all_items = list(PRODUCT_DB.items())
+            random.shuffle(all_items)
+            fallback = []
+            for handle, p in all_items[:3]:
+                fallback.append({
+                    "title": p["title"],
+                    "url": p["url"],
+                    "image": p["image"],
+                    "description": "Şu an yoğunluk var, birkaç saniye sonra tekrar deneyin. Bu arada bu kokuya göz atabilirsiniz."
+                })
+            if fallback:
+                return jsonify({"recommendations": fallback, "fallback": True})
             return err(str(e))
 
     try:
