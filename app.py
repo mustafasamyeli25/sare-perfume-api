@@ -214,56 +214,105 @@ MUADIL_MAP = {
     "molecule": "escentric molecule", "molecules": "escentric molecule",
 }
 
+def tr_normalize(text: str) -> str:
+    """Türkçe karakterleri ve yazım farklarını ASCII'ye çevir."""
+    tr_map = str.maketrans("şŞğĞıİçÇöÖüÜ", "sSgGiIcCoOuU")
+    return text.lower().translate(tr_map).strip()
+
 def normalize_query(query: str) -> str:
-    """Yazım hatalarını ve kısaltmaları normalize et."""
-    q = query.lower().strip()
+    """Yazım hatalarını ve kısaltmaları normalize et. Türkçe karakter toleranslı."""
+    q = tr_normalize(query)
     for alias, canonical in MUADIL_MAP.items():
-        if alias in q:
+        alias_norm = tr_normalize(alias)
+        if alias_norm in q:
             return canonical
     return q
 
 def is_muadil_query(query: str) -> bool:
     """Kullanıcı orijinal bir parfüm adı mı arıyor?"""
-    q = query.lower()
-    # Direkt harita eşleşmesi
-    if any(alias in q for alias in MUADIL_MAP):
+    q = tr_normalize(query)
+    # Direkt harita eşleşmesi (Türkçe karakter toleranslı)
+    if any(tr_normalize(alias) in q for alias in MUADIL_MAP):
         return True
     # Genel sinyal kelimeleri
-    signals = ["muadil", "alternatif", "benzer", "yerine", "var mı", "var mi",
-               "satıyor musunuz", "arıyorum", "ariyorum"]
+    signals = ["muadil", "alternatif", "benzer", "yerine", "var mi", "var mı",
+               "satiyor musunuz", "ariyorum", "arıyorum", "kokusu var mi",
+               "benzerini", "ucuz alternatif"]
     return any(s in q for s in signals)
 
+def detect_user_context(query: str) -> dict:
+    """Kullanıcının cinsiyetini ve bağlamını çıkar."""
+    q = tr_normalize(query)
+    context = {"user_gender": "belirsiz", "occasion": "genel", "age_hint": ""}
+
+    # Kadın sinyalleri
+    kadin_signals = [
+        "erkek arkadasim", "erkek arkadaşım", "sevgilim", "esim", "eşim",
+        "kocam", "nişanlım", "nisanlim", "bulusuyorum", "buluşuyorum",
+        "randevum var", "date", "buluşma", "flort", "bulusma"
+    ]
+    # Erkek sinyalleri  
+    erkek_signals = [
+        "kız arkadasim", "kız arkadaşım", "sevgilim", "nişanlım",
+        "karım", "karim", "es", "eş"
+    ]
+
+    # Kontrol — "erkek arkadaşım" varsa kullanıcı kadındır
+    if any(s in q for s in kadin_signals):
+        context["user_gender"] = "kadın"
+    elif any(s in q for s in erkek_signals):
+        context["user_gender"] = "erkek"
+
+    # Yaş ipuçları
+    if any(s in q for s in ["genc", "genç", "20", "21", "22", "23", "liseli", "universite"]):
+        context["age_hint"] = "genç"
+    elif any(s in q for s in ["olgun", "35", "40", "profesyonel", "is kadini", "iş kadını"]):
+        context["age_hint"] = "yetişkin"
+
+    # Ortam
+    ortam_map = {
+        "sahil": "sahil", "deniz": "sahil", "plaj": "sahil",
+        "spor": "spor", "gym": "spor", "kosuyorum": "spor", "koşuyorum": "spor",
+        "ofis": "ofis", "is": "ofis", "toplanti": "ofis",
+        "gece": "gece", "aksam": "gece", "yemek": "gece", "bulusma": "bulusma",
+        "dugun": "dugun", "özel": "gece", "ozel": "gece"
+    }
+    for key, val in ortam_map.items():
+        if key in q:
+            context["occasion"] = val
+            break
+
+    return context
+
 def muadil_catalog(query: str) -> str:
-    """Muadil araması için katalogdan ilgili ürünleri getir."""
-    q_normalized = normalize_query(query)
-    q_lower = query.lower()
+    """Muadil araması için katalogdan ilgili ürünleri getir. Türkçe karakter toleranslı."""
+    q_norm = tr_normalize(query)
 
     # Normalize edilmiş sorgudan anahtar kelimeler çıkar
     search_terms = set()
     for alias, canonical in MUADIL_MAP.items():
-        if alias in q_lower:
-            # Canonical'dan kelimeler al
+        alias_norm = tr_normalize(alias)
+        if alias_norm in q_norm:
             for word in canonical.split():
                 if len(word) > 2:
-                    search_terms.add(word)
-            # Alias kelimelerini de ekle
+                    search_terms.add(word.lower())
             for word in alias.split():
                 if len(word) > 2:
-                    search_terms.add(word)
+                    search_terms.add(word.lower())
 
-    # Sorgunun kendi kelimelerini de ekle
-    for word in q_lower.split():
+    # Sorgunun kendi kelimelerini de ekle (normalize edilmiş)
+    for word in q_norm.split():
         if len(word) > 2:
             search_terms.add(word)
 
-    # Katalogda ara
+    # Katalogda ara — hem orijinal hem normalize karşılaştır
     matched = []
     for line in PERFUME_ALL_LINES:
-        line_lower = line.lower()
-        if any(term in line_lower for term in search_terms):
+        line_norm = tr_normalize(line)
+        if any(term in line_norm for term in search_terms):
             matched.append(line)
 
-    # Eşleşme yoksa tüm katalogu ver
+    # Eşleşme yoksa tüm katalogu karıştır
     if not matched:
         all_lines = PERFUME_ALL_LINES[:]
         random.shuffle(all_lines)
@@ -290,33 +339,68 @@ def build_prompt(has_image, user_query=""):
             "GÖREV: Müşterinin aradığı orijinal parfümün Sare muadilini katalogdan bul.\n"
             "ÖNEMLİ KURALLAR:\n"
             "1. Etiketlerde 'Muadili' kelimesi geçen veya orijinal parfüm/marka adı etiketlerde olan ürünü seç\n"
-            "2. Müşteri tam adı yazamayabilir — 'dior savaş' = Dior Sauvage, 'bleu' = Bleu de Chanel gibi yorum yap\n"
+            "2. Müşteri tam adı yazamayabilir veya Türkçe harflerle yazabilir — "
+            "'nişhane'='nishane', 'dior savaş'='Dior Sauvage', 'blö de şanel'='Bleu de Chanel', "
+            "'şanel no5'='Chanel No5' gibi yorum yap\n"
             "3. Doğru muadili bulduysan 1 ürün yeterli, birden fazla seçenek varsa max 3 öner\n"
-            "4. Açıklamada: hangi orijinal parfümün muadili olduğunu belirt, koku karakterini anlat, "
+            "4. Açıklamada: hangi orijinal parfümün muadili olduğunu yaz, koku karakterini anlat, "
             "fiyat avantajından bahset\n\n"
             "SADECE JSON döndür:\n"
             '{"recommendations":[{"kimlik":"handle-degeri","aciklama":"açıklama"}]}'
         )
 
-    # Normal öneri modu — duygusal, hikaye anlatıcı
+    # Bağlam analizi
+    ctx = detect_user_context(user_query)
+    
+    # Cinsiyet notu oluştur
+    cinsiyet_notu = ""
+    if ctx["user_gender"] == "kadın":
+        cinsiyet_notu = (
+            "\nCİNSİYET BAĞLAMI: Kullanıcı kadın. 'Erkek arkadaşım', 'sevgilim', 'eşim' gibi "
+            "ifadeler kullanmış — bu KENDİSİ için parfüm arıyor demektir, erkek parfümü değil. "
+            "SADECE kadın veya unisex parfüm öner.\n"
+        )
+    elif ctx["user_gender"] == "erkek":
+        cinsiyet_notu = (
+            "\nCİNSİYET BAĞLAMI: Kullanıcı erkek. SADECE erkek veya unisex parfüm öner.\n"
+        )
+
+    # Ortam notu
+    ortam_ornekleri = {
+        "sahil": "Güneş teninde, saçlarında tuz var. Deniz rüzgarı seni saçlarından öpüyor. "
+                 "Bu an için: narenciye, tuz, aqua, taze çiçek notaları. Asla ağır oud veya oryantal değil.",
+        "spor": "Ter değil, enerji kokusu. Spor sonrası bile taze hissettirecek, "
+                "hafif ve uzun süre yayılan bir koku. Aqua, yeşil, hafif ahşap notaları.",
+        "ofis": "Zarif ama iddia sahibi. Çevreyi rahatsız etmeyen, ama odaya girince "
+                "fark ettiren bir koku. Pudralı, odunsu veya hafif çiçekli.",
+        "gece": "Gecenin enerjisi. Loş ışıklar, müzik, yakın mesafe. "
+                "Kalıcı, derin, unutulmaz. Oryantal, amber, misk notaları öne çıkabilir.",
+        "bulusma": "Karşındaki seni ilk gördüğünde değil, ilk kokladığında hatırlayacak. "
+                   "Büyüleyici ama agresif değil. Floral, misk, hafif baharatlı notalar.",
+        "dugun": "Özel bir gün, özel bir koku. Yıllarca hatırlarda kalacak. "
+                 "İddiasız ama asil. Beyaz çiçekler, pudra, ince odun.",
+        "genel": "Müşterinin anlattığı ana ve ruh haline tam uyan bir koku seç."
+    }
+    ortam_notu = ortam_ornekleri.get(ctx["occasion"], ortam_ornekleri["genel"])
+
+    # Normal öneri modu
     return (
-        "Sen Sare Parfüm'ün koku uzmanısın. İnsan ruhunu, anları ve duyguları kokuya "
-        "çevirebilen bir şairsin. Müşteriye reklam değil, gerçek bir deneyim sunarsın.\n\n"
-        "KATALOG (format: handle|isim|etiketler):\n" + smart_catalog(user_query) + "\n\n" + img_note +
-        "GÖREV: Müşterinin anlattığı an, ortam ve ruh haline göre katalogdan en uygun 3 parfümü seç.\n"
-        "KRİTİK KURALLAR:\n"
-        "1. ORTAMA UYGUNLUK: Sahil/deniz = taze, aqua, narenciye notalar. "
-        "Spor = hafif, temiz, uzun süre yayılan. "
-        "Akşam yemeği = oryantal, derin, kalıcı. "
-        "Ofis = nötr, zarif, rahatsız etmeyen. "
-        "Yanlış kategoriden asla önerme — sahil için ağır oud önermek yasak.\n"
-        "2. AÇIKLAMA TARZI: Her parfüm için o anı yaşatır gibi yaz. "
-        "Sahilde yürüyüş için: \'Dalga sesi arkanda, ayaklarının altında ıslak kum, "
-        "burnuna ilk çarpan o tuz ve deniz kokusu — işte tam bu an için.\' "
-        "Notaları teknik değil, duyusal anlat. Neden BU an için doğru olduğunu hissettir.\n"
-        "3. KİŞİSELLEŞTİR: Müşterinin anlattığı detayları açıklamaya yansıt.\n\n"
+        "Sen Sare Parfüm'ün koku uzmanısın. Kokuları satmıyorsun, anları ve duyguları "
+        "kelimelere döküyorsun. Her önerin bir hikaye, bir his, bir an.\n\n"
+        "KATALOG (format: handle|isim|etiketler):\n" + smart_catalog(user_query) + "\n\n"
+        + img_note + cinsiyet_notu +
+        f"\nORTAM: {ortam_notu}\n\n"
+        "GÖREV: Katalogdan ortama ve kullanıcıya EN UYGUN 3 parfümü seç.\n\n"
+        "AÇIKLAMA KURALLARI — ÇOK ÖNEMLİ:\n"
+        "1. Her açıklama o anı YAŞATMALI. Teknik not listesi değil, sinematik bir sahne.\n"
+        "   YANLIŞ: 'Bu parfüm turunçgil ve sandal ağacı notaları içerir.'\n"
+        "   DOĞRU: 'Güneş henüz yükseliyor, teninde dün gecenin tuzlu havası var — "
+        "bu koku tam o sınırda duruyor, denizden çıkmış gibi temiz, ama gizemli.'\n"
+        "2. Müşterinin anlattığı detayı (sahil, buluşma, yaş, his) açıklamaya yansıt.\n"
+        "3. Sonu güçlü bitir: neden BU an için biçilmiş kaftan olduğunu hissettir.\n"
+        "4. Klişe yasak: 'etkileyici', 'büyüleyici', 'özel' gibi boş kelimeler kullanma.\n\n"
         "SADECE JSON döndür:\n"
-        '{"recommendations":[{"kimlik":"handle-degeri","aciklama":"3-4 cümle etkileyici açıklama"}]}'
+        '{"recommendations":[{"kimlik":"handle-degeri","aciklama":"3-4 cümle"}]}'
     )
 
 # ─────────────────────────────────────────────────────────
