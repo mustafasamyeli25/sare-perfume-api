@@ -69,8 +69,8 @@ def analyze_image_with_gemini(image_b64: str) -> str:
     """Müşterinin yüklediği fotoğrafı analiz edip, tarzını/enerjisini metne döker."""
     img_str = image_b64.split(",", 1)[-1] if "," in image_b64 else image_b64
     mime = "image/jpeg"
-    if image_b64.startswith("data:image/png"): mime = "image/png"
-    elif image_b64.startswith("data:image/webp"): mime = "image/webp"
+    if image_base64.startswith("data:image/png"): mime = "image/png"
+    elif image_base64.startswith("data:image/webp"): mime = "image/webp"
     
     # Gemini'nin görme (vision) yetenekli modelini kullanıyoruz
     model = genai.GenerativeModel('gemini-2.0-flash') 
@@ -153,9 +153,9 @@ async def recommend(request: Request):
             logging.info(f"📸 Resim analizi tamamlandı: {image_context}")
         except Exception as e:
             logging.warning(f"Resim analizi başarısız: {e}")
-            return JSONResponse({"error": "Fotoğraf analiz edilemedi, lütfen farklı bir fotoğraf deneyin veya yazı ile arayın."}, status_code=400)
+            return JSONResponse({"error": "Fotoğraf analiz edilemedi, lütfen farklı bir fotoğraf deneyin."}, status_code=400)
 
-    # Arama metnini birleştir (Kullanıcının yazdığı + Fotoğraftan çıkan stil)
+    # Arama metnini birleştir
     combined_search_text = f"{user_query} {image_context}".strip()
 
     # ADIM 1: ÖN BELLEK (REDİS)
@@ -165,7 +165,8 @@ async def recommend(request: Request):
             cached_result = redis.get(cache_key)
             if cached_result:
                 logging.info("⚡ Redis'ten önbellek yanıtı döndü.")
-                return JSONResponse(json.loads(cached_result))
+                res_str = cached_result.decode("utf-8") if isinstance(cached_result, bytes) else cached_result
+                return JSONResponse(json.loads(res_str))
         except Exception as e:
             logging.warning(f"Redis hatası: {e}")
 
@@ -206,7 +207,7 @@ async def recommend(request: Request):
     
     GÖREV: Bu 3 parfümü müşteriye zarif, edebi ve kokuyu hissettirecek bir dille anlat.
     - SADECE JSON formatında çıktı ver. Başka hiçbir şey yazma.
-    - Orijinal markalardan bahsederken "birebir aynısı" yerine "ilham alan" gibi şık tabirler kullan.
+    - Orijinal markalardan bahsederken "ilham alan" gibi şık tabirler kullan.
     
     FORMAT ŞÖYLE OLMALI:
     {{
@@ -231,7 +232,8 @@ async def recommend(request: Request):
             logging.info("⭐ Gemini ile başarıyla yedek yanıt üretildi.")
         except Exception as err:
             logging.error(f"Her iki API de çöktü: {err}")
-            return JSONResponse({"error": "Danışmanlarımız şu an çok meşgul. Lütfen birazdan tekrar deneyin."}, status_code=503)
+            return JSONResponse({"error": "Danışmanlarımız çok meşgul. Lütfen birazdan tekrar deneyin."}, status_code=503)
 
     try:
+        # JSON temizleme ve parse etme
         cleaned_json = re.sub(r'^
