@@ -37,7 +37,7 @@ else:
     logging.info(f"{len(API_KEYS)} adet API anahtarı yüklendi.")
 
 # Model tercihi — önce hız/kota dengesi iyi olan
-MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash-latest", "gemini-1.5-flash-001"]
+MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
 
 CSV_FILE_NAME    = "products_export_1 (2).csv"
 PLACEHOLDER_IMG  = "https://via.placeholder.com/150?text=Sare+Perfume"
@@ -128,13 +128,12 @@ def call_gemini(parts: list) -> dict:
     for model in MODELS:
         for key in keys_to_try:
             url = (
-                f"https://generativelanguage.googleapis.com/v1/models/"
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
                 f"{model}:generateContent?key={key}"
             )
             payload = {
                 "contents": [{"parts": parts}],
                 "generationConfig": {
-                    "responseMimeType": "application/json",
                     "temperature": 0.85,
                     "maxOutputTokens": 1024
                 }
@@ -273,12 +272,12 @@ def test_keys():
     results = []
     test_payload = {
         "contents": [{"parts": [{"text": "Say hello in one word."}]}],
-        "generationConfig": {"maxOutputTokens": 10}
+        "generationConfig": {"maxOutputTokens": 20, "temperature": 0.1}
     }
     for model in MODELS:
         for key in API_KEYS:
             url = (
-                f"https://generativelanguage.googleapis.com/v1/models/"
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
                 f"{model}:generateContent?key={key}"
             )
             try:
