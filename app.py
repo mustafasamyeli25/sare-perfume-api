@@ -24,15 +24,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── Environment Variables ─────────────────────────────────────────────────────
-PINECONE_API_KEY   = os.environ["PINECONE_API_KEY"]
-PINECONE_INDEX     = os.environ.get("PINECONE_INDEX", "sare-perfume")
-PINECONE_HOST      = os.environ["PINECONE_HOST"]          # e.g. https://sare-perfume-xxxx.svc.xxx.pinecone.io
+# Hepsi .get() ile alınıyor — eksik variable app'i başlatma aşamasında çökertemez.
+# Endpoint çağrısında eksikse anlamlı hata mesajı döner.
+PINECONE_API_KEY    = os.environ.get("PINECONE_API_KEY", "")
+PINECONE_INDEX      = os.environ.get("PINECONE_INDEX", "sare-perfume")
+PINECONE_HOST       = os.environ.get("PINECONE_HOST", "")   # https://sare-perfume-xxxx.svc.xxx.pinecone.io
 
-UPSTASH_REDIS_URL  = os.environ["UPSTASH_REDIS_URL"]      # https://xxx.upstash.io
-UPSTASH_REDIS_TOKEN= os.environ["UPSTASH_REDIS_TOKEN"]
+UPSTASH_REDIS_URL   = os.environ.get("UPSTASH_REDIS_URL", "")
+UPSTASH_REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_TOKEN", "")
 
-GEMINI_API_KEYS    = [k.strip() for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k.strip()]
-GROQ_API_KEYS      = [k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()]
+GEMINI_API_KEYS     = [k.strip() for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k.strip()]
+GROQ_API_KEYS       = [k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()]
 
 CACHE_TTL          = int(os.environ.get("CACHE_TTL", 3600))   # seconds
 TOP_K              = int(os.environ.get("TOP_K", 3))
@@ -447,7 +449,21 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    missing = []
+    if not PINECONE_API_KEY:    missing.append("PINECONE_API_KEY")
+    if not PINECONE_HOST:       missing.append("PINECONE_HOST")
+    if not UPSTASH_REDIS_URL:   missing.append("UPSTASH_REDIS_URL")
+    if not UPSTASH_REDIS_TOKEN: missing.append("UPSTASH_REDIS_TOKEN")
+    if not GEMINI_API_KEYS:     missing.append("GEMINI_API_KEYS")
+    if not GROQ_API_KEYS:       missing.append("GROQ_API_KEYS")
+    return {
+        "status": "healthy" if not missing else "degraded",
+        "missing_env_vars": missing,
+        "pinecone_index": PINECONE_INDEX,
+        "pinecone_host_set": bool(PINECONE_HOST),
+        "groq_keys": len(GROQ_API_KEYS),
+        "gemini_keys": len(GEMINI_API_KEYS),
+    }
 
 
 @app.post("/recommend", response_model=RecommendationResponse)
