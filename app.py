@@ -148,23 +148,34 @@ async def cache_set(key: str, value: str) -> None:
     except Exception as e:
         logger.warning(f"Cache SET: {e}")
 
-# ── Embedding — Google GenAI SDK ──────────────────────────────────────────────
+# ── Embedding — Direkt HTTP v1 (SDK v1beta kullaniyor, o yuzden bypass) ──────
 def embed_text_sync(text: str) -> list[float]:
     """
-    Veri yuklemede: genai.embed_content(model='models/embedding-001',
-                                         task_type='retrieval_document')
-    Burada ayni model, task_type='retrieval_query', sonuc [:768]
+    Google embedding-001 modeli v1 endpoint'inde.
+    SDK v1beta kullandigi icin httpx ile direkt cagriyoruz.
+    Veri yuklemede kullanilan model/task ile tam uyumlu, sonuc [:768].
     """
+    import httpx as _httpx
     last_err = None
     for _ in range(len(GEMINI_KEYS)):
+        api_key = get_gemini_key()
         try:
-            genai.configure(api_key=get_gemini_key())
-            result = genai.embed_content(
-                model="models/embedding-001",
-                content=text,
-                task_type="retrieval_query",
+            url = (
+                "https://generativelanguage.googleapis.com/v1"
+                f"/models/embedding-001:embedContent?key={api_key}"
             )
-            values = result["embedding"]
+            payload = {
+                "model": "models/embedding-001",
+                "content": {"parts": [{"text": text}]},
+                "taskType": "RETRIEVAL_QUERY",
+            }
+            r = _httpx.post(url, json=payload, timeout=15)
+            if r.status_code == 429:
+                last_err = "429 rate limit"
+                logger.warning(f"Embedding 429, sonraki key...")
+                continue
+            r.raise_for_status()
+            values = r.json()["embedding"]["values"]
             logger.info(f"Embedding OK: {len(values)} -> {PINECONE_DIM} dim")
             return values[:PINECONE_DIM]
         except Exception as e:
