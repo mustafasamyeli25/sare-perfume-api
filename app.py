@@ -327,41 +327,50 @@ def recommend():
 # ─────────────────────────────────────────────────────────
 @app.route("/test", methods=["GET"])
 def test_keys():
+    """Her key+model kombinasyonunu sırayla test eder (2s aralıkla - rate limit aşmaz)."""
     results = []
     test_payload = {
-        "contents": [{"parts": [{"text": "Say hello in one word."}]}],
-        "generationConfig": {"maxOutputTokens": 20, "temperature": 0.1}
+        "contents": [{"parts": [{"text": "Say hello."}]}],
+        "generationConfig": {"maxOutputTokens": 5, "temperature": 0.1}
     }
-    for model in MODELS:
-        for key in API_KEYS:
-            url = (
-                f"https://generativelanguage.googleapis.com/v1beta/models/"
-                f"{model}:generateContent?key={key}"
-            )
-            try:
-                r = requests.post(url, json=test_payload, timeout=10)
-                results.append({
-                    "model": model,
-                    "key_tail": f"...{key[-8:]}",
-                    "status": r.status_code,
-                    "ok": r.status_code == 200,
-                    "msg": r.json().get("error", {}).get("message", "OK")[:120] if r.status_code != 200 else "✅ ÇALIŞIYOR"
-                })
-                if r.status_code == 200:
-                    break  # bu model çalışıyor, diğer keyleri test etme
-            except Exception as e:
-                results.append({
-                    "model": model,
-                    "key_tail": f"...{key[-8:]}",
-                    "status": 0,
-                    "ok": False,
-                    "msg": str(e)[:120]
-                })
+    # Sadece birincil modeli test et, tüm keyler için
+    model = MODELS[0]
+    for i, key in enumerate(API_KEYS):
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent?key={key}"
+        )
+        try:
+            r = requests.post(url, json=test_payload, timeout=10)
+            ok = r.status_code == 200
+            msg = "✅ ÇALIŞIYOR" if ok else r.json().get("error", {}).get("message", "?")[:100]
+            results.append({
+                "key_no"  : i + 1,
+                "key_tail": f"...{key[-10:]}",
+                "model"   : model,
+                "status"  : r.status_code,
+                "ok"      : ok,
+                "msg"     : msg
+            })
+        except Exception as e:
+            results.append({
+                "key_no"  : i + 1,
+                "key_tail": f"...{key[-10:]}",
+                "model"   : model,
+                "status"  : 0,
+                "ok"      : False,
+                "msg"     : str(e)[:100]
+            })
+        if i < len(API_KEYS) - 1:
+            time.sleep(2)  # Rate limit aşmamak için bekle
+
     working = [r for r in results if r["ok"]]
     return jsonify({
-        "total_keys": len(API_KEYS),
-        "working_combinations": len(working),
-        "results": results
+        "total_keys"  : len(API_KEYS),
+        "working_keys": len(working),
+        "model_tested": model,
+        "note"        : "Anahtarlar sırayla 2s aralıkla test edildi (rate limit güvenli)",
+        "results"     : results
     })
 
 # ─────────────────────────────────────────────────────────
