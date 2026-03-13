@@ -244,7 +244,7 @@ async def embed_text(text: str) -> list[float]:
     """
     Google Generative AI REST API ile embedding.
     - Veri yükleme: genai.embed_content(model="models/embedding-001", task_type="retrieval_document")
-    - Burada:       REST POST /v1beta/models/embedding-001:embedContent, taskType=RETRIEVAL_QUERY
+    - Burada:       REST POST /v1/models/embedding-001:embedContent, taskType=RETRIEVAL_QUERY
     - Sonuç mutlaka [:768] ile kesilir (Pinecone boyutu)
     - 5 Gemini key sırayla denenir, 429 → sonraki key, 404 → sonraki model
     """
@@ -254,7 +254,7 @@ async def embed_text(text: str) -> list[float]:
             api_key = next_gemini_key()
             # REST API'de URL'e models/ prefix ekliyoruz, payload'da da aynı
             url = (
-                f"https://generativelanguage.googleapis.com/v1beta"
+                f"https://generativelanguage.googleapis.com/v1"
                 f"/models/{model_id}:embedContent?key={api_key}"
             )
             payload = {
