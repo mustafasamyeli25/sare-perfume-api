@@ -13,6 +13,27 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 # Vercel'de env değişkeni olarak tanımla:
 #   GEMINI_API_KEY_1, GEMINI_API_KEY_2, GEMINI_API_KEY_3 ...
 # ─────────────────────────────────────────────────────────
+
+def get_groq_keys():
+    """GROQ_API_KEY ortam değişkeninden Groq anahtarlarını okur (virgülle ayrılabilir)."""
+    keys = []
+    val = os.environ.get("GROQ_API_KEY", "").strip()
+    if val:
+        for k in val.split(","):
+            k = k.strip()
+            if k:
+                keys.append(k)
+    for i in range(1, 10):
+        k = os.environ.get(f"GROQ_API_KEY_{i}", "").strip()
+        if k: keys.append(k)
+    return list(dict.fromkeys(keys))
+
+GROQ_KEYS = get_groq_keys()
+if GROQ_KEYS:
+    logging.info(f"{len(GROQ_KEYS)} Groq anahtarı yüklendi.")
+else:
+    logging.warning("GROQ_API_KEY bulunamadı — sadece Gemini kullanılacak.")
+
 def get_api_keys():
     keys = []
     # GEMINI_API_KEY içinde virgülle ayrılmış birden fazla anahtar desteklenir
@@ -163,33 +184,70 @@ def build_prompt(has_image, user_query=""):
 # ─────────────────────────────────────────────────────────
 # GEMİNİ REST API ÇAĞRISI — çoklu anahtar + model fallback
 # ─────────────────────────────────────────────────────────
+def call_groq(prompt_text: str) -> str:
+    """
+    Groq API — LLaMA modeli, ücretsiz tier günde 14.400 istek.
+    Görüntü desteği yok, sadece metin.
+    """
+    if not GROQ_KEYS:
+        raise Exception("NO_GROQ_KEYS")
+
+    keys_to_try = GROQ_KEYS.copy()
+    random.shuffle(keys_to_try)
+
+    for model in GROQ_MODELS:
+        for key in keys_to_try:
+            try:
+                r = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt_text}],
+                        "temperature": 0.85,
+                        "max_tokens": 1024,
+                        "response_format": {"type": "json_object"}
+                    },
+                    timeout=30
+                )
+                if r.status_code == 200:
+                    logging.info(f"✅ Groq başarılı: {model}")
+                    return r.json()["choices"][0]["message"]["content"]
+                elif r.status_code == 429:
+                    logging.warning(f"Groq 429: {model}, key=...{key[-6:]}")
+                    time.sleep(0.5)
+                    continue
+                else:
+                    logging.warning(f"Groq {r.status_code}: {r.text[:150]}")
+                    continue
+            except requests.Timeout:
+                logging.warning(f"Groq timeout: {model}")
+                continue
+            except Exception as e:
+                logging.warning(f"Groq hata: {e}")
+                continue
+    raise Exception("GROQ_FAILED")
+
+
 def call_gemini(parts: list) -> dict:
-    """
-    Tüm anahtarları dener. 429'da kısa bekleyip tekrar dener (max 2 tur).
-    """
+    """Gemini yedek — Groq başarısız olursa."""
     if not API_KEYS:
         raise Exception("NO_KEYS")
 
     payload = {
         "contents": [{"parts": parts}],
-        "generationConfig": {
-            "temperature": 0.85,
-            "maxOutputTokens": 1024
-        }
+        "generationConfig": {"temperature": 0.85, "maxOutputTokens": 1024}
     }
-
     last_error = None
-
     for model in MODELS:
-        # Her model için anahtarları 2 tur dene (ilk tur hızlı, ikinci tur bekleyerek)
         for attempt in range(2):
             keys_to_try = API_KEYS.copy()
             random.shuffle(keys_to_try)
-
             if attempt == 1:
-                logging.info(f"Tüm keyler 429 verdi, 3s bekleyip tekrar deneniyor: {model}")
                 time.sleep(3)
-
             for key in keys_to_try:
                 url = (
                     f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -198,42 +256,32 @@ def call_gemini(parts: list) -> dict:
                 try:
                     r = requests.post(url, json=payload, timeout=30)
                     if r.status_code == 200:
-                        logging.info(f"✅ Başarılı: model={model}, key=...{key[-6:]}")
+                        logging.info(f"✅ Gemini yedek başarılı: {model}")
                         return r.json()
-                    elif r.status_code == 429:
-                        logging.warning(f"429: model={model}, key=...{key[-6:]}")
+                    elif r.status_code in (429, 403):
                         last_error = "QUOTA"
-                        time.sleep(0.2)
-                        continue
-                    elif r.status_code == 403:
-                        logging.warning(f"403 API aktif değil: key=...{key[-6:]}")
-                        last_error = "API_DISABLED"
+                        time.sleep(0.3)
                         continue
                     elif r.status_code == 404:
-                        logging.warning(f"404 model yok: {model}")
                         last_error = "BAD_REQUEST"
-                        break  # sonraki modele geç
+                        break
                     elif r.status_code == 400:
                         body = r.json()
                         if "blocked" in str(body).lower():
                             raise Exception("BLOCKED")
-                        logging.warning(f"400: {body}")
                         last_error = "BAD_REQUEST"
                         break
                     else:
-                        logging.warning(f"HTTP {r.status_code}: {r.text[:150]}")
                         last_error = f"HTTP_{r.status_code}"
                         continue
                 except requests.Timeout:
-                    logging.warning(f"Timeout: {model}, key=...{key[-6:]}")
                     last_error = "TIMEOUT"
                     continue
                 except Exception as e:
                     raise e
             else:
-                continue  # iç döngü break ile çıkmadıysa devam et
-            break  # 404/400 ile break → dış döngüye (model döngüsüne) geç
-
+                continue
+            break
     raise Exception(last_error or "ALL_FAILED")
 
 # ─────────────────────────────────────────────────────────
@@ -286,18 +334,32 @@ def recommend():
             logging.warning(f"Resim çözümleme hatası: {e}")
             return jsonify({"error": "Geçersiz resim formatı. JPG veya PNG yükle."}), 400
 
-    try:
-        gemini_response = call_gemini(parts)
-    except Exception as e:
-        return err(str(e))
+    # Groq önce dene (metin sorgusu veya sadece metin), Gemini yedek
+    raw_json = None
+    prompt_text = build_prompt(has_image, user_query)
+    if user_query and not has_image and GROQ_KEYS:
+        # Sadece metin → Groq kullan (daha hızlı ve cömert)
+        try:
+            full_prompt = prompt_text + f"\n\nMüşteri mesajı: {user_query}"
+            raw_json = call_groq(full_prompt)
+            logging.info("Groq ile yanıt alındı.")
+        except Exception as e:
+            logging.warning(f"Groq başarısız, Gemini'ye geçiliyor: {e}")
+            raw_json = None
 
-    # Yanıtı ayrıştır
+    if raw_json is None:
+        # Groq yoksa veya başarısızsa Gemini dene
+        try:
+            gemini_response = call_gemini(parts)
+            raw = gemini_response["candidates"][0]["content"]["parts"][0]["text"]
+            raw_json = re.sub(r'^```(?:json)?', '', raw.strip()).rstrip('`').strip()
+        except Exception as e:
+            return err(str(e))
+
     try:
-        raw = gemini_response["candidates"][0]["content"]["parts"][0]["text"]
-        raw = re.sub(r'^```(?:json)?', '', raw.strip()).rstrip('`').strip()
-        data_parsed = json.loads(raw)
+        data_parsed = json.loads(raw_json)
     except Exception as e:
-        logging.error(f"JSON parse hatası: {e} | Yanıt: {gemini_response}")
+        logging.error(f"JSON parse hatası: {e} | Ham: {str(raw_json)[:200]}")
         return err("ALL_FAILED")
 
     results = []
