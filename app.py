@@ -169,12 +169,7 @@ async def normalize_query(raw: str) -> str:
     if len(raw.split()) >= 6:
         return raw
 
-    api_key = next_gemini_key()
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={api_key}"
-    )
-    prompt = f"""Sen bir parfüm uzmanısın. Kullanıcının yazdığı sorguyu analiz et ve Pinecone vektör araması için zenginleştirilmiş bir parfüm arama cümlesi oluştur.
+    prompt = f""""Sen bir parfüm uzmanısın. Kullanıcının yazdığı sorguyu analiz et ve Pinecone vektör araması için zenginleştirilmiş bir parfüm arama cümlesi oluştur.
 
 Kullanıcı sorgusu: "{raw}"
 
@@ -194,16 +189,27 @@ Zenginleştirilmiş sorgu:"""
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": 80},
     }
-    try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            r = await client.post(url, json=payload)
-            r.raise_for_status()
-            normalized = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            logger.info(f"🔤 Normalize: '{raw}' → '{normalized}'")
-            return normalized
-    except Exception as e:
-        logger.warning(f"Normalizasyon atlandı: {e}")
-        return raw  # Hata olursa orijinal sorguyu kullan
+    # Tüm Gemini key'lerini sırayla dene
+    for _ in range(len(GEMINI_API_KEYS) or 1):
+        api_key = next_gemini_key()
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models"
+            f"/gemini-1.5-flash:generateContent?key={api_key}"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=8) as client:
+                r = await client.post(url, json=payload)
+                if r.status_code == 429:
+                    continue  # Sonraki key
+                r.raise_for_status()
+                normalized = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                logger.info(f"🔤 Normalize: '{raw}' → '{normalized}'")
+                return normalized
+        except Exception as e:
+            logger.warning(f"Normalizasyon key hatası: {e}")
+            continue
+    logger.warning("Tüm Gemini key'leri başarısız, orijinal sorgu kullanılıyor.")
+    return raw
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -211,20 +217,33 @@ Zenginleştirilmiş sorgu:"""
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def embed_text(text: str) -> list[float]:
-    """Gemini text-embedding-004 ile 768 boyutlu vektör üret."""
-    api_key = next_gemini_key()
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"text-embedding-004:embedContent?key={api_key}"
-    )
-    payload = {
-        "model": "models/text-embedding-004",
-        "content": {"parts": [{"text": text}]},
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.post(url, json=payload)
-        r.raise_for_status()
-        return r.json()["embedding"]["values"]
+    """
+    Gemini embedding — sırayla key dene, hepsi başarısızsa hata fırlat.
+    Model: text-embedding-004 (768 dim)
+    """
+    last_err = None
+    for _ in range(len(GEMINI_API_KEYS) or 1):
+        api_key = next_gemini_key()
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta"
+            f"/models/text-embedding-004:embedContent?key={api_key}"
+        )
+        payload = {
+            "model": "models/text-embedding-004",
+            "content": {"parts": [{"text": text}]},
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(url, json=payload)
+                if r.status_code == 429:
+                    last_err = "429 rate limit"
+                    continue          # Sonraki key'i dene
+                r.raise_for_status()
+                return r.json()["embedding"]["values"]
+        except Exception as e:
+            last_err = str(e)
+            continue
+    raise HTTPException(status_code=503, detail=f"Embedding servisi yanıt vermedi: {last_err}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -367,7 +386,7 @@ async def call_gemini_flash(system: str, user: str) -> dict:
     api_key = next_gemini_key()
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={api_key}"
+        f"gemini-1.5-flash:generateContent?key={api_key}"
     )
     payload = {
         "system_instruction": {"parts": [{"text": system}]},
@@ -404,7 +423,7 @@ async def analyze_style_with_vision(image_bytes: bytes, mime_type: str = "image/
     api_key = next_gemini_key()
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={api_key}"
+        f"gemini-1.5-flash:generateContent?key={api_key}"
     )
     image_b64 = base64.b64encode(image_bytes).decode()
     payload = {
