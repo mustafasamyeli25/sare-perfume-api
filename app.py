@@ -170,20 +170,107 @@ def smart_catalog(query: str, max_items: int = 80) -> str:
 # ─────────────────────────────────────────────────────────
 # PROMPT
 # ─────────────────────────────────────────────────────────
+
+# Yazım hataları ve kısaltmalar dahil marka/parfüm eşleşme tablosu
+MUADIL_MAP = {
+    # Dior
+    "sauvage": "dior sauvage", "savaş": "dior sauvage", "savaj": "dior sauvage",
+    "dior savaş": "dior sauvage", "dior savaj": "dior sauvage",
+    "miss dior": "miss dior", "j'adore": "jadore", "jadore": "jadore",
+    "fahrenheit": "dior fahrenheit", "poison": "dior poison",
+    # Chanel
+    "no5": "chanel no5", "no 5": "chanel no5", "number 5": "chanel no5",
+    "coco": "chanel coco mademoiselle", "coco mademoiselle": "chanel coco mademoiselle",
+    "bleu": "bleu de chanel", "bleu de chanel": "bleu de chanel",
+    "allure": "chanel allure", "chance": "chanel chance",
+    # Tom Ford
+    "ombre leather": "tom ford ombre leather", "ombre": "tom ford ombre leather",
+    "black orchid": "tom ford black orchid", "tobacco vanille": "tom ford tobacco vanille",
+    "lost cherry": "tom ford lost cherry", "neroli portofino": "tom ford neroli portofino",
+    # Creed
+    "aventus": "creed aventus", "silver mountain": "creed silver mountain water",
+    "viking": "creed viking",
+    # Armani
+    "acqua di gio": "armani acqua di gio", "acqua": "armani acqua di gio",
+    "si": "armani si", "code": "armani code",
+    # YSL
+    "ysl": "ysl", "libre": "ysl libre", "black opium": "ysl black opium",
+    "opium": "ysl opium", "y edp": "ysl y",
+    # Versace
+    "eros": "versace eros", "dylan blue": "versace dylan blue",
+    "bright crystal": "versace bright crystal",
+    # Prada
+    "candy": "prada candy", "luna rossa": "prada luna rossa",
+    # Gucci
+    "bloom": "gucci bloom", "guilty": "gucci guilty",
+    # Diğerleri
+    "baccarat": "baccarat rouge 540", "rouge 540": "baccarat rouge 540",
+    "oud wood": "oud wood", "angel": "mugler angel",
+    "la vie": "lancome la vie est belle", "la vie est belle": "lancome la vie est belle",
+    "invictus": "paco rabanne invictus", "million": "paco rabanne 1 million",
+    "1 million": "paco rabanne 1 million", "olympea": "paco rabanne olympea",
+    "good girl": "carolina herrera good girl", "212": "carolina herrera 212",
+    "boss": "hugo boss", "baldessarini": "baldessarini",
+    "molecule": "escentric molecule", "molecules": "escentric molecule",
+}
+
+def normalize_query(query: str) -> str:
+    """Yazım hatalarını ve kısaltmaları normalize et."""
+    q = query.lower().strip()
+    for alias, canonical in MUADIL_MAP.items():
+        if alias in q:
+            return canonical
+    return q
+
 def is_muadil_query(query: str) -> bool:
     """Kullanıcı orijinal bir parfüm adı mı arıyor?"""
-    muadil_signals = [
-        "muadil", "alternatif", "benzer", "gibi", "yerine",
-        "chanel", "dior", "gucci", "versace", "armani", "prada",
-        "ysl", "hermes", "creed", "amouage", "tom ford", "bvlgari",
-        "burberry", "calvin", "hugo", "davidoff", "lancome", "givenchy",
-        "montblanc", "bleu", "sauvage", "aventus", "eros", "noir",
-        "coco", "allure", "chance", "fahrenheit", "oud", "invictus",
-        "acqua", "polo", "fahrenheit", "opium", "poison", "narciso",
-        "molecule", "tobacco", "black orchid", "rose", "wood"
-    ]
     q = query.lower()
-    return any(s in q for s in muadil_signals)
+    # Direkt harita eşleşmesi
+    if any(alias in q for alias in MUADIL_MAP):
+        return True
+    # Genel sinyal kelimeleri
+    signals = ["muadil", "alternatif", "benzer", "yerine", "var mı", "var mi",
+               "satıyor musunuz", "arıyorum", "ariyorum"]
+    return any(s in q for s in signals)
+
+def muadil_catalog(query: str) -> str:
+    """Muadil araması için katalogdan ilgili ürünleri getir."""
+    q_normalized = normalize_query(query)
+    q_lower = query.lower()
+
+    # Normalize edilmiş sorgudan anahtar kelimeler çıkar
+    search_terms = set()
+    for alias, canonical in MUADIL_MAP.items():
+        if alias in q_lower:
+            # Canonical'dan kelimeler al
+            for word in canonical.split():
+                if len(word) > 2:
+                    search_terms.add(word)
+            # Alias kelimelerini de ekle
+            for word in alias.split():
+                if len(word) > 2:
+                    search_terms.add(word)
+
+    # Sorgunun kendi kelimelerini de ekle
+    for word in q_lower.split():
+        if len(word) > 2:
+            search_terms.add(word)
+
+    # Katalogda ara
+    matched = []
+    for line in PERFUME_ALL_LINES:
+        line_lower = line.lower()
+        if any(term in line_lower for term in search_terms):
+            matched.append(line)
+
+    # Eşleşme yoksa tüm katalogu ver
+    if not matched:
+        all_lines = PERFUME_ALL_LINES[:]
+        random.shuffle(all_lines)
+        matched = all_lines[:80]
+
+    logging.info(f"Muadil katalog: {len(search_terms)} terim, {len(matched)} ürün bulundu")
+    return "\n".join(matched[:80])
 
 def build_prompt(has_image, user_query=""):
     img_note = ""
@@ -197,27 +284,39 @@ def build_prompt(has_image, user_query=""):
     # Muadil arama modu
     if user_query and not has_image and is_muadil_query(user_query):
         return (
-            "Sen Sare Parfüm'ün uzman danışmanısın. Sare, ünlü parfümlerin muadillerini üretiyor.\n\n"
-            "KATALOG (format: handle|isim|etiketler):\n" + smart_catalog(user_query) + "\n\n"
-            "GÖREV: Müşteri bir orijinal parfüm adı yazdı. Katalogdan o parfümün muadili olan "
-            "Sare ürününü bul (etiketlerde 'Muadili' veya orijinal marka adı geçen ürünler). "
-            "En uygun 1-3 ürünü seç. Her biri için şunu belirt: hangi orijinal parfümün muadili "
-            "olduğunu ve fiyat/kalite avantajını 2 cümlede anlat.\n\n"
+            "Sen Sare Parfüm'ün uzman danışmanısın. Sare, dünyaca ünlü parfümlerin "
+            "muadillerini üretiyor — aynı koku ailesi, çok daha uygun fiyat.\n\n"
+            "KATALOG (format: handle|isim|etiketler):\n" + muadil_catalog(user_query) + "\n\n"
+            "GÖREV: Müşterinin aradığı orijinal parfümün Sare muadilini katalogdan bul.\n"
+            "ÖNEMLİ KURALLAR:\n"
+            "1. Etiketlerde 'Muadili' kelimesi geçen veya orijinal parfüm/marka adı etiketlerde olan ürünü seç\n"
+            "2. Müşteri tam adı yazamayabilir — 'dior savaş' = Dior Sauvage, 'bleu' = Bleu de Chanel gibi yorum yap\n"
+            "3. Doğru muadili bulduysan 1 ürün yeterli, birden fazla seçenek varsa max 3 öner\n"
+            "4. Açıklamada: hangi orijinal parfümün muadili olduğunu belirt, koku karakterini anlat, "
+            "fiyat avantajından bahset\n\n"
             "SADECE JSON döndür:\n"
-            '{"recommendations":[{"kimlik":"handle-degeri","aciklama":"2 cümle açıklama"}]}'
+            '{"recommendations":[{"kimlik":"handle-degeri","aciklama":"açıklama"}]}'
         )
 
-    # Normal öneri modu
+    # Normal öneri modu — duygusal, hikaye anlatıcı
     return (
-        "Sen dünyanın en iyi parfüm butiklerinden birinde çalışan, insan ruhunu ve kokuları "
-        "derinlemesine bilen bir uzmanısın. Müşterilere reklam değil, gerçek bir dost gibi "
-        "konuşursun — sıcak, özgün, biraz gizemli. Klişe cümleler hiç kullanmazsın.\n\n"
+        "Sen Sare Parfüm'ün koku uzmanısın. İnsan ruhunu, anları ve duyguları kokuya "
+        "çevirebilen bir şairsin. Müşteriye reklam değil, gerçek bir deneyim sunarsın.\n\n"
         "KATALOG (format: handle|isim|etiketler):\n" + smart_catalog(user_query) + "\n\n" + img_note +
-        "GÖREV: Müşterinin mesajı veya fotoğrafından yola çıkarak katalogdan en uygun 3 parfümü seç. "
-        "Her biri için 2-3 cümlelik, KİŞİYE ÖZEL, etkileyici bir açıklama yaz. "
-        "Onun hakkında fark ettiğin özgün bir detaydan başla.\n\n"
-        "SADECE JSON döndür, başka hiçbir şey yazma:\n"
-        '{"recommendations":[{"kimlik":"handle-degeri","aciklama":"2-3 cümle"}]}'
+        "GÖREV: Müşterinin anlattığı an, ortam ve ruh haline göre katalogdan en uygun 3 parfümü seç.\n"
+        "KRİTİK KURALLAR:\n"
+        "1. ORTAMA UYGUNLUK: Sahil/deniz = taze, aqua, narenciye notalar. "
+        "Spor = hafif, temiz, uzun süre yayılan. "
+        "Akşam yemeği = oryantal, derin, kalıcı. "
+        "Ofis = nötr, zarif, rahatsız etmeyen. "
+        "Yanlış kategoriden asla önerme — sahil için ağır oud önermek yasak.\n"
+        "2. AÇIKLAMA TARZI: Her parfüm için o anı yaşatır gibi yaz. "
+        "Sahilde yürüyüş için: \'Dalga sesi arkanda, ayaklarının altında ıslak kum, "
+        "burnuna ilk çarpan o tuz ve deniz kokusu — işte tam bu an için.\' "
+        "Notaları teknik değil, duyusal anlat. Neden BU an için doğru olduğunu hissettir.\n"
+        "3. KİŞİSELLEŞTİR: Müşterinin anlattığı detayları açıklamaya yansıt.\n\n"
+        "SADECE JSON döndür:\n"
+        '{"recommendations":[{"kimlik":"handle-degeri","aciklama":"3-4 cümle etkileyici açıklama"}]}'
     )
 
 # ─────────────────────────────────────────────────────────
