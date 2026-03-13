@@ -125,7 +125,18 @@ def make_cache_key(data: dict) -> str:
     raw = json.dumps(data, sort_keys=True, ensure_ascii=False)
     return "sare:" + hashlib.sha256(raw.encode()).hexdigest()[:24]
 
+def _redis_ready() -> bool:
+    """Redis kullanılabilir mi? URL ve token kontrolü."""
+    return (
+        bool(UPSTASH_REDIS_URL)
+        and UPSTASH_REDIS_URL.startswith("https://")
+        and bool(UPSTASH_REDIS_TOKEN)
+    )
+
 async def redis_get(key: str) -> Optional[str]:
+    if not _redis_ready():
+        logger.debug("Redis devre dışı (URL/token eksik), cache atlanıyor.")
+        return None
     try:
         async with httpx.AsyncClient(timeout=3) as client:
             r = await client.get(
@@ -139,6 +150,8 @@ async def redis_get(key: str) -> Optional[str]:
         return None
 
 async def redis_set(key: str, value: str, ttl: int = CACHE_TTL) -> None:
+    if not _redis_ready():
+        return
     try:
         async with httpx.AsyncClient(timeout=3) as client:
             await client.post(
@@ -551,6 +564,8 @@ async def health():
         "pinecone_host_set": bool(PINECONE_HOST),
         "groq_keys": len(GROQ_API_KEYS),
         "gemini_keys": len(GEMINI_API_KEYS),
+        "redis_ready": _redis_ready(),
+        "redis_url_prefix": UPSTASH_REDIS_URL[:30] + "..." if UPSTASH_REDIS_URL else "YOK",
     }
 
 
