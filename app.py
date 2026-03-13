@@ -94,11 +94,12 @@ app.add_middleware(
 
 # ── Request / Response Models ─────────────────────────────────────────────────
 class QueryRequest(BaseModel):
-    query: str
-    gender: Optional[str] = None       # "erkek" | "kadın" | "unisex"
-    season: Optional[str] = None       # "yaz" | "kış" | "ilkbahar" | "sonbahar"
-    budget: Optional[str] = None       # "düşük" | "orta" | "yüksek"
-    occasion: Optional[str] = None     # "iş" | "gece" | "günlük" | "özel"
+    query: Optional[str] = None        # Metin sorgusu (image varsa gerekmez)
+    image: Optional[str] = None        # Base64 data URL: "data:image/jpeg;base64,..."
+    gender: Optional[str] = None
+    season: Optional[str] = None
+    budget: Optional[str] = None
+    occasion: Optional[str] = None
 
 
 class Recommendation(BaseModel):
@@ -150,6 +151,59 @@ async def redis_set(key: str, value: str, ttl: int = CACHE_TTL) -> None:
             )
     except Exception as e:
         logger.warning(f"Redis SET hatası: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# QUERY NORMALIZATION — Yazım hatası / kısaltma / marka adı düzeltici
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def normalize_query(raw: str) -> str:
+    """
+    Kullanıcının yazdığı ham sorguyu (yazım hatası, kısaltma, marka adı, Türkçe karşılık vb.)
+    Pinecone için zengin bir parfüm arama sorgusuna dönüştürür.
+    Örn: "savaj" → "Dior Sauvage erkek odunsu amber taze koku"
+         "chanel 5" → "Chanel No5 kadın çiçeksi aldehit klasik"
+         "siyah orkide" → "Tom Ford Black Orchid oryantal çiçeksi"
+    """
+    # Çok kısa ve zaten açıklayıcı sorgular için atlayabiliriz
+    if len(raw.split()) >= 6:
+        return raw
+
+    api_key = next_gemini_key()
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.0-flash:generateContent?key={api_key}"
+    )
+    prompt = f"""Sen bir parfüm uzmanısın. Kullanıcının yazdığı sorguyu analiz et ve Pinecone vektör araması için zenginleştirilmiş bir parfüm arama cümlesi oluştur.
+
+Kullanıcı sorgusu: "{raw}"
+
+Kurallar:
+- Yazım hatalarını düzelt (savaj→Sauvage, chanel 5→Chanel No5, siyah orkide→Black Orchid)
+- Kısaltmaları aç (bsd→Blue Seduction, adg→Acqua Di Gio)
+- Marka adını ekle (Sauvage→Dior Sauvage, No5→Chanel No5)
+- Parfümün bilinen notalarını, cinsiyetini ve karakterini ekle
+- Türkçe yazılmış yabancı parfüm isimlerini tanı (kayıp koku→Angel, kara orkide→Black Orchid)
+- Sadece zenginleştirilmiş arama cümlesini yaz, başka hiçbir şey yazma
+- Maksimum 20 kelime
+- Cevabı Türkçe yaz
+
+Zenginleştirilmiş sorgu:"""
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 80},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.post(url, json=payload)
+            r.raise_for_status()
+            normalized = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            logger.info(f"🔤 Normalize: '{raw}' → '{normalized}'")
+            return normalized
+    except Exception as e:
+        logger.warning(f"Normalizasyon atlandı: {e}")
+        return raw  # Hata olursa orijinal sorguyu kullan
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -404,11 +458,15 @@ async def rag_pipeline(query: str, filters: dict) -> dict:
         result["cached"] = True
         return result
 
-    # 2. Embedding
-    logger.info("🔢 Embedding oluşturuluyor...")
-    vector = await embed_text(query)
+    # 2. Query normalizasyonu (yazım hatası, kısaltma, Türkçe karşılık vb.)
+    logger.info("🔤 Query normalize ediliyor...")
+    normalized_query = await normalize_query(query)
 
-    # 3. Pinecone – opsiyonel metadata filtresi
+    # 3. Embedding (normalize edilmiş sorguyla)
+    logger.info("🔢 Embedding oluşturuluyor...")
+    vector = await embed_text(normalized_query)
+
+    # 4. Pinecone – opsiyonel metadata filtresi
     pinecone_filter = {}
     if filters.get("gender"):
         pinecone_filter["gender"] = {"$in": [filters["gender"], "unisex"]}
@@ -421,7 +479,7 @@ async def rag_pipeline(query: str, filters: dict) -> dict:
     if not products:
         raise HTTPException(status_code=404, detail="Uygun parfüm bulunamadı.")
 
-    # 4. LLM
+    # 5. LLM
     logger.info("✨ LLM çağrılıyor...")
     system_prompt = build_system_prompt()
     user_prompt   = build_user_prompt(query, products, filters)
@@ -444,7 +502,7 @@ async def rag_pipeline(query: str, filters: dict) -> dict:
         "cached": False,
     }
 
-    # 5. Cache'e kaydet
+    # 6. Cache'e kaydet
     await redis_set(cache_key, json.dumps(result, ensure_ascii=False))
     return result
 
@@ -481,21 +539,36 @@ async def health():
 async def recommend(req: QueryRequest):
     """
     Ana öneri endpoint'i.
-    Shopify frontend'den fetch ile çağrılır.
+    Hem metin (query) hem de base64 görsel (image) destekler.
+    Shopify frontend'den JSON olarak çağrılır.
     """
+    filters = {k: v for k, v in {
+        "gender": req.gender, "season": req.season,
+        "budget": req.budget, "occasion": req.occasion,
+    }.items() if v}
+
+    # Görsel gönderildiyse Vision analizi yap
+    if req.image:
+        try:
+            # "data:image/jpeg;base64,XXXX" formatını çöz
+            header, b64data = req.image.split(",", 1)
+            mime = header.split(":")[1].split(";")[0]  # image/jpeg
+            image_bytes = base64.b64decode(b64data)
+            logger.info("🖼️ Base64 görsel alındı, Vision analizi yapılıyor...")
+            style_query = await analyze_style_with_vision(image_bytes, mime)
+            logger.info(f"Stil: {style_query}")
+            result = await rag_pipeline(style_query, filters)
+            result["style_analysis"] = style_query
+            return JSONResponse(content=result)
+        except Exception as e:
+            logger.error(f"Vision hatası: {e}")
+            raise HTTPException(status_code=400, detail=f"Görsel işlenemedi: {str(e)}")
+
+    # Metin sorgusu
     if not req.query or len(req.query.strip()) < 2:
-        raise HTTPException(status_code=400, detail="Lütfen geçerli bir sorgu girin.")
+        raise HTTPException(status_code=400, detail="Lütfen metin yazın veya fotoğraf yükleyin.")
 
-    filters = {
-        "gender": req.gender,
-        "season": req.season,
-        "budget": req.budget,
-        "occasion": req.occasion,
-    }
-    # None değerleri temizle
-    filters = {k: v for k, v in filters.items() if v}
-
-    result = await rag_pipeline(req.query, filters)
+    result = await rag_pipeline(req.query.strip(), filters)
     return JSONResponse(content=result)
 
 
