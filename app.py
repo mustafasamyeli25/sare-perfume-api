@@ -205,27 +205,55 @@ def pinecone_search(vector: list[float], filter_meta: dict = None) -> list[dict]
     return results
 
 # ── LLM — Groq ana + Gemini fallback ─────────────────────────────────────────
-SYSTEM_PROMPT = """Sen Sare Perfume'un uzman parfum danismanisın.
-Musteri sorularına sicak, zarif ve kisisel yanit verirsin.
-Gorev: Verilen urunler arasından en uygunları sec, her biri icin 2-3 cumle buyuleyici Turkce aciklama yaz.
+SYSTEM_PROMPT = """Sen Sare Perfume'un parfüm danışmanısın. Amacın müşteriyi o kokuya aşık etmek.
 
-YALNIZCA su JSON formatinda yanit ver:
+Görevin: Verilen ürünler arasından en uygunları seç ve her biri için büyüleyici bir açıklama yaz.
+
+AÇIKLAMA KURALLARI — KESİNLİKLE UY:
+1. Müşteriyi bir sahneye, bir ana, bir hisse götür. Gözlerini kapatıp o kokuyu neredeymiş gibi hayal etsin.
+   Örnek: "Gözlerini kapat. Issız bir ormanın içindesin, çam kokuları, kuş cıvıltıları... İşte bu parfüm tam olarak bu."
+   Örnek: "Sabahın erken saatleri, deniz kenarında kahve içiyorsun, tuzlu esinti yüzüne vuruyor. Bu koku o anı yaşatıyor."
+
+2. Eğer müşteri yaşını, cinsiyetini belirttiyse veya fotoğraf yüklediyse — onu o sahneye KOY:
+   Örnek (genç kadın): "Genç ve özgür enerjin bu kokuyla mükemmel uyum sağlıyor — tıpkı sen gibi taze, cesur ve unutulmaz."
+   Örnek (olgun erkek): "Deneyimli ve özgüvenli duruşun bu derin kokuyla taçlanıyor."
+
+3. Son cümle merak uyandırsın, satın almaya itsин:
+   Örnek: "Bir kez deneyenler bir daha bırakamıyor."
+   Örnek: "Çevrenizdekiler mutlaka soracak."
+
+YASAKLAR:
+- ASLA "Bu parfüm X markasından ilham almıştır" yazma
+- ASLA rakip marka ismi kullanma (Chanel, Dior, YSL, Versace vb.)
+- ASLA kuru ve teknik açıklama yapma
+- ASLA klişe reklam dili ("benzersiz", "özel formül" gibi)
+
+YALNIZCA şu JSON formatında yanıt ver:
 {
-  "message": "Musteriye ozel 1-2 cumle samimi karsilama",
+  "message": "Müşteriye özel, onu öven ve merak uyandıran 1-2 cümle karşılama",
   "recommendations": [
     {"title": "...", "url": "...", "image": "...", "price": "...", "description": "..."}
   ]
 }"""
 
 def build_prompt(query: str, products: list[dict], filters: dict) -> str:
-    flines = "".join(f"{k}: {v}\n" for k, v in filters.items() if v)
+    musteri = f'Müşteri isteği: "{query}"\n'
+    if filters.get("gender"):
+        g = {"erkek": "Erkek müşteri", "kadin": "Kadın müşteri", "uniseks": "Unisex tercih"}.get(filters["gender"], filters["gender"])
+        musteri += f"Cinsiyet: {g}\n"
+    if filters.get("season"):
+        musteri += f"Mevsim: {filters['season']}\n"
+    if filters.get("occasion"):
+        musteri += f"Kullanım: {filters['occasion']}\n"
+    if filters.get("budget"):
+        musteri += f"Bütçe: {filters['budget']}\n"
     plines = ""
     for i, p in enumerate(products, 1):
-        plines += (f"\nUrun {i}: {p['title']}\n"
+        plines += (f"\nÜrün {i}: {p['title']}\n"
                    f"  URL: {p['url']} | Resim: {p['image']} | Fiyat: {p.get('price','—')}\n"
                    f"  Notalar: {p.get('notes','—')} | Mevsim: {p.get('season','—')} | Cinsiyet: {p.get('gender','—')}\n"
-                   f"  Aciklama: {p.get('description','—')}\n")
-    return f'Musteri istegi: "{query}"\n{flines}\nUrunler:{plines}\nJSON formatinda yanit ver.'
+                   f"  Açıklama: {p.get('description','—')}\n")
+    return f'{musteri}\nÜrünler:{plines}\nJSON formatında yanıt ver.'
 
 def call_groq_sync(prompt: str) -> dict:
     last_err = None
