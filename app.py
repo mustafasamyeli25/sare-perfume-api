@@ -1,10 +1,11 @@
 """
-Sare Perfume - AI Danışman Backend v3
-- Pinecone resmi SDK (PINECONE_HOST'a gerek yok)
-- Google Generative AI resmi SDK (v1/v1beta karmaşası yok)
-- Groq resmi SDK (key rotasyonu)
-- Normalizasyon adımı kaldırıldı (Pinecone zaten semantik arama yapıyor)
-- Vercel 10s timeout'a uygun hız
+Sare Perfume - AI Danışman Backend v4
+Rüya Takımı:
+- Embedding: Cohere (embed-multilingual-v3.0, 1024 dim)
+- LLM: Groq (llama-3.3-70b) → Gemini fallback
+- Vision: Gemini Flash
+- Cache: Upstash Redis
+- Arama: Pinecone SDK
 """
 
 import os
@@ -12,6 +13,8 @@ import json
 import base64
 import hashlib
 import logging
+import unicodedata
+import re
 from itertools import cycle
 from typing import Optional
 
@@ -20,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+import cohere
 import google.generativeai as genai
 from pinecone import Pinecone
 from groq import Groq
@@ -29,8 +33,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── Env Variables ─────────────────────────────────────────────────────────────
+COHERE_API_KEY      = os.environ.get("COHERE_API_KEY", "")
 PINECONE_API_KEY    = os.environ.get("PINECONE_API_KEY", "")
-PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX", "sare-perfume")
+PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX", "sare-perfume-cohere")
 
 UPSTASH_REDIS_URL   = (os.environ.get("UPSTASH_REDIS_URL") or
                        os.environ.get("UPSTASH_REDIS_REST_URL", ""))
@@ -45,7 +50,7 @@ GROQ_KEYS = [k.strip() for k in _groq_raw.split(",") if k.strip()]
 
 CACHE_TTL    = int(os.environ.get("CACHE_TTL", 3600))
 TOP_K        = int(os.environ.get("TOP_K", 3))
-PINECONE_DIM = 768
+COHERE_DIM   = 1024
 
 # ── Key Rotasyonu ─────────────────────────────────────────────────────────────
 _gem_cycle  = None
@@ -54,7 +59,7 @@ _groq_cycle = None
 def get_gemini_key() -> str:
     global _gem_cycle
     if not GEMINI_KEYS:
-        raise HTTPException(503, "GEMINI_API_KEY tanımlı değil")
+        raise HTTPException(503, "GEMINI_API_KEY tanimli degil")
     if _gem_cycle is None:
         _gem_cycle = cycle(GEMINI_KEYS)
     return next(_gem_cycle)
@@ -62,7 +67,7 @@ def get_gemini_key() -> str:
 def get_groq_key() -> str:
     global _groq_cycle
     if not GROQ_KEYS:
-        raise HTTPException(503, "GROQ_API_KEY tanımlı değil")
+        raise HTTPException(503, "GROQ_API_KEY tanimli degil")
     if _groq_cycle is None:
         _groq_cycle = cycle(GROQ_KEYS)
     return next(_groq_cycle)
@@ -74,14 +79,14 @@ def get_index():
     global _pc_index
     if _pc_index is None:
         if not PINECONE_API_KEY:
-            raise HTTPException(503, "PINECONE_API_KEY tanımlı değil")
+            raise HTTPException(503, "PINECONE_API_KEY tanimli degil")
         pc = Pinecone(api_key=PINECONE_API_KEY)
         _pc_index = pc.Index(PINECONE_INDEX_NAME)
         logger.info(f"Pinecone baglandi: {PINECONE_INDEX_NAME}")
     return _pc_index
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
-app = FastAPI(title="Sare Perfume AI v3", version="3.0.0")
+app = FastAPI(title="Sare Perfume AI v4", version="4.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -148,48 +153,34 @@ async def cache_set(key: str, value: str) -> None:
     except Exception as e:
         logger.warning(f"Cache SET: {e}")
 
-# ── Embedding — Direkt HTTP v1 (SDK v1beta kullaniyor, o yuzden bypass) ──────
+# ── Embedding — Cohere ────────────────────────────────────────────────────────
 def embed_text_sync(text: str) -> list[float]:
     """
-    text-embedding-004 once dene (yeni isim), 404 gelirse embedding-001 dene (eski isim).
-    Her iki model icin tum keyler sirayla denenir.
-    Sonuc [:768] — Pinecone boyutu.
+    Cohere embed-multilingual-v3.0 ile 1024 boyutlu vektör üret.
+    Pinecone'a yüklerken search_document, aramada search_query kullanılır.
     """
-    import httpx as _httpx
-    MODELS = ["text-embedding-004", "embedding-001"]
-    last_err = None
-    for model_id in MODELS:
-        for _ in range(len(GEMINI_KEYS)):
-            api_key = get_gemini_key()
-            url = (
-                "https://generativelanguage.googleapis.com/v1"
-                f"/models/{model_id}:embedContent?key={api_key}"
-            )
-            payload = {
-                "model": f"models/{model_id}",
-                "content": {"parts": [{"text": text}]},
-                "taskType": "RETRIEVAL_QUERY",
-            }
-            try:
-                r = _httpx.post(url, json=payload, timeout=15)
-                if r.status_code == 404:
-                    last_err = f"{model_id}: 404"
-                    logger.warning(f"Model bulunamadi: {model_id}, sonraki deneniyor...")
-                    break  # Bu modeli birak, sıradakine gec
-                if r.status_code == 429:
-                    last_err = f"{model_id}: 429 rate limit"
-                    logger.warning(f"Rate limit, sonraki key...")
-                    continue
-                r.raise_for_status()
-                values = r.json()["embedding"]["values"]
-                logger.info(f"Embedding OK: {model_id} {len(values)}->{PINECONE_DIM} dim")
-                return values[:PINECONE_DIM]
-            except Exception as e:
-                last_err = str(e)
-                logger.warning(f"Embedding hatasi ({model_id}): {e}")
-                continue
-    raise HTTPException(503, f"Embedding basarisiz: {last_err}")
+    if not COHERE_API_KEY:
+        raise HTTPException(503, "COHERE_API_KEY tanimli degil")
+    try:
+        co = cohere.Client(COHERE_API_KEY)
+        response = co.embed(
+            texts=[text],
+            model="embed-multilingual-v3.0",
+            input_type="search_query",
+        )
+        values = response.embeddings[0]
+        logger.info(f"Cohere embedding OK: {len(values)} dim")
+        return values
+    except Exception as e:
+        raise HTTPException(503, f"Cohere embedding basarisiz: {e}")
 
+# ── ID normalize (Pinecone ASCII zorunluluğu) ─────────────────────────────────
+def ascii_id(text: str) -> str:
+    text = unicodedata.normalize('NFKD', text)
+    text = text.encode('ascii', 'ignore').decode('ascii')
+    text = re.sub(r'[^a-z0-9-]', '-', text.lower())
+    text = re.sub(r'-+', '-', text).strip('-')
+    return text[:100]
 
 # ── Pinecone Arama ────────────────────────────────────────────────────────────
 def pinecone_search(vector: list[float], filter_meta: dict = None) -> list[dict]:
@@ -215,10 +206,10 @@ def pinecone_search(vector: list[float], filter_meta: dict = None) -> list[dict]
 
 # ── LLM — Groq ana + Gemini fallback ─────────────────────────────────────────
 SYSTEM_PROMPT = """Sen Sare Perfume'un uzman parfum danismanisın.
-Musteri sorularına sicak, zarif ve kisisel yanıt verirsin.
-Gorev: Verilen urunler arasından en uygunları sec, her biri icin 2-3 cumle buyuleyici Turkce acıklama yaz.
+Musteri sorularına sicak, zarif ve kisisel yanit verirsin.
+Gorev: Verilen urunler arasından en uygunları sec, her biri icin 2-3 cumle buyuleyici Turkce aciklama yaz.
 
-YALNIZCA su JSON formatında yanıt ver:
+YALNIZCA su JSON formatinda yanit ver:
 {
   "message": "Musteriye ozel 1-2 cumle samimi karsilama",
   "recommendations": [
@@ -227,9 +218,7 @@ YALNIZCA su JSON formatında yanıt ver:
 }"""
 
 def build_prompt(query: str, products: list[dict], filters: dict) -> str:
-    flines = "".join(
-        f"{k}: {v}\n" for k, v in filters.items() if v
-    )
+    flines = "".join(f"{k}: {v}\n" for k, v in filters.items() if v)
     plines = ""
     for i, p in enumerate(products, 1):
         plines += (f"\nUrun {i}: {p['title']}\n"
@@ -263,7 +252,7 @@ def call_gemini_sync(prompt: str) -> dict:
         try:
             genai.configure(api_key=get_gemini_key())
             model = genai.GenerativeModel(
-                "gemini-1.5-flash",
+                "gemini-2.0-flash",
                 system_instruction=SYSTEM_PROMPT,
                 generation_config=genai.GenerationConfig(
                     temperature=0.7,
@@ -286,17 +275,17 @@ def call_llm_sync(prompt: str) -> dict:
         logger.warning(f"Groq basarisiz ({e}), Gemini'ye geciliyor...")
         return call_gemini_sync(prompt)
 
-# ── Vision — Stil Analizi ─────────────────────────────────────────────────────
+# ── Vision — Gemini Flash ─────────────────────────────────────────────────────
 def analyze_style_sync(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
     last_err = None
     for _ in range(len(GEMINI_KEYS)):
         try:
             genai.configure(api_key=get_gemini_key())
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            model = genai.GenerativeModel("gemini-2.0-flash")
             prompt = (
-                "Bu fotograftaki kisinin stilini, ruh halini ve genel estetigini analiz et. "
-                "Renk paleti, giyim tarzi ve atmosferi goz onunde bulundurarak bu kisiye uygun "
-                "parfum notalarini ve ozelliklerini Turkce olarak kisa ve oz belirt. "
+                "Bu fotograftaki kisinin stilini analiz et. "
+                "Renk paleti, giyim tarzi ve atmosferi goz onunde bulundurarak "
+                "bu kisiye uygun parfum notalarini Turkce olarak belirt. "
                 "Sadece parfum arama sorgusuna donusturulebilecek bir metin yaz, maks 20 kelime."
             )
             resp = model.generate_content([{"mime_type": mime_type, "data": image_bytes}, prompt])
@@ -319,13 +308,13 @@ async def rag_pipeline(query: str, filters: dict) -> dict:
         data["cached"] = True
         return data
 
-    # Embedding
+    # Cohere Embedding
     vector = await loop.run_in_executor(None, embed_text_sync, query)
 
     # Pinecone filtresi
     pf = {}
     if filters.get("gender"):
-        pf["gender"] = {"$in": [filters["gender"], "unisex"]}
+        pf["gender"] = {"$in": [filters["gender"], "uniseks"]}
     if filters.get("season"):
         pf["season"] = {"$in": [filters["season"], "tum mevsimler"]}
 
@@ -359,17 +348,19 @@ async def rag_pipeline(query: str, filters: dict) -> dict:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "Sare Perfume AI v3"}
+    return {"status": "ok", "service": "Sare Perfume AI v4 — Rüya Takımı"}
 
 @app.get("/health")
 async def health():
     missing = []
+    if not COHERE_API_KEY:   missing.append("COHERE_API_KEY")
     if not PINECONE_API_KEY: missing.append("PINECONE_API_KEY")
     if not GEMINI_KEYS:      missing.append("GEMINI_API_KEY(S)")
     if not GROQ_KEYS:        missing.append("GROQ_API_KEY(S)")
     return {
         "status":         "healthy" if not missing else "degraded",
         "missing":        missing,
+        "cohere":         bool(COHERE_API_KEY),
         "gemini_keys":    len(GEMINI_KEYS),
         "groq_keys":      len(GROQ_KEYS),
         "redis_ready":    _redis_ok(),
@@ -391,7 +382,7 @@ async def recommend(req: QueryRequest):
             mime = header.split(":")[1].split(";")[0]
             img_bytes = base64.b64decode(b64data)
             query = await loop.run_in_executor(None, analyze_style_sync, img_bytes, mime)
-            logger.info(f"Stil sorgusu: {query}")
+            logger.info(f"Vision sorgusu: {query}")
         except HTTPException:
             raise
         except Exception as e:
@@ -418,7 +409,6 @@ async def recommend_by_image(
     img_bytes = await image.read()
     if len(img_bytes) > 5 * 1024 * 1024:
         raise HTTPException(400, "Resim 5 MB'i gecemez.")
-
     loop = asyncio.get_event_loop()
     query = await loop.run_in_executor(None, analyze_style_sync, img_bytes, image.content_type)
     filters = {k: v for k, v in {
