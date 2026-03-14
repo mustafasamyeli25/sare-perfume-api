@@ -151,37 +151,45 @@ async def cache_set(key: str, value: str) -> None:
 # ── Embedding — Direkt HTTP v1 (SDK v1beta kullaniyor, o yuzden bypass) ──────
 def embed_text_sync(text: str) -> list[float]:
     """
-    Google embedding-001 modeli v1 endpoint'inde.
-    SDK v1beta kullandigi icin httpx ile direkt cagriyoruz.
-    Veri yuklemede kullanilan model/task ile tam uyumlu, sonuc [:768].
+    text-embedding-004 once dene (yeni isim), 404 gelirse embedding-001 dene (eski isim).
+    Her iki model icin tum keyler sirayla denenir.
+    Sonuc [:768] — Pinecone boyutu.
     """
     import httpx as _httpx
+    MODELS = ["text-embedding-004", "embedding-001"]
     last_err = None
-    for _ in range(len(GEMINI_KEYS)):
-        api_key = get_gemini_key()
-        try:
+    for model_id in MODELS:
+        for _ in range(len(GEMINI_KEYS)):
+            api_key = get_gemini_key()
             url = (
                 "https://generativelanguage.googleapis.com/v1"
-                f"/models/embedding-001:embedContent?key={api_key}"
+                f"/models/{model_id}:embedContent?key={api_key}"
             )
             payload = {
-                "model": "models/embedding-001",
+                "model": f"models/{model_id}",
                 "content": {"parts": [{"text": text}]},
                 "taskType": "RETRIEVAL_QUERY",
             }
-            r = _httpx.post(url, json=payload, timeout=15)
-            if r.status_code == 429:
-                last_err = "429 rate limit"
-                logger.warning(f"Embedding 429, sonraki key...")
+            try:
+                r = _httpx.post(url, json=payload, timeout=15)
+                if r.status_code == 404:
+                    last_err = f"{model_id}: 404"
+                    logger.warning(f"Model bulunamadi: {model_id}, sonraki deneniyor...")
+                    break  # Bu modeli birak, sıradakine gec
+                if r.status_code == 429:
+                    last_err = f"{model_id}: 429 rate limit"
+                    logger.warning(f"Rate limit, sonraki key...")
+                    continue
+                r.raise_for_status()
+                values = r.json()["embedding"]["values"]
+                logger.info(f"Embedding OK: {model_id} {len(values)}->{PINECONE_DIM} dim")
+                return values[:PINECONE_DIM]
+            except Exception as e:
+                last_err = str(e)
+                logger.warning(f"Embedding hatasi ({model_id}): {e}")
                 continue
-            r.raise_for_status()
-            values = r.json()["embedding"]["values"]
-            logger.info(f"Embedding OK: {len(values)} -> {PINECONE_DIM} dim")
-            return values[:PINECONE_DIM]
-        except Exception as e:
-            last_err = str(e)
-            logger.warning(f"Embedding hatasi: {e}")
     raise HTTPException(503, f"Embedding basarisiz: {last_err}")
+
 
 # ── Pinecone Arama ────────────────────────────────────────────────────────────
 def pinecone_search(vector: list[float], filter_meta: dict = None) -> list[dict]:
